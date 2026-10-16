@@ -709,7 +709,7 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
 
   server.tool(
     "search_passages",
-    "Search documents full-text and return bounded text passages around each hit instead of whole documents. Locates the query terms in each matching document's stored content, cuts a window (default 800 chars) around the first occurrence, and returns it with the document id, title, score, offset, content_length, and the server's own highlighted snippet. Use this to locate and skim evidence across many documents without flooding context; page further with get_document_content offsets.",
+    "Search documents full-text and return bounded text passages around each hit instead of whole documents. The window is anchored on the server's own highlighted phrase (falling back to the first verbatim term, then the document head), so the returned passage contains the actual hit even when stemming matched a word variant. Queries that the server rejects with an HTTP 400 are retried once with a defensively rewritten query (apostrophes and stray quotes removed); such responses carry query_sanitized: true. Returns document id, title, score, offset, content_length, and the highlighted snippet. Use this to locate and skim evidence across many documents without flooding context; page further with get_document_content offsets.",
     {
       query: z
         .string()

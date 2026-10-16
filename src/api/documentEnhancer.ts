@@ -12,12 +12,22 @@ interface CustomField {
 export interface EnhancedDocument
   extends Omit<
     Document,
-    "correspondent" | "document_type" | "tags" | "custom_fields"
+    | "correspondent"
+    | "document_type"
+    | "tags"
+    | "custom_fields"
+    | "content"
   > {
   correspondent: NamedItem | null;
   document_type: NamedItem | null;
   tags: NamedItem[];
   custom_fields: CustomField[];
+  /**
+   * Size of the excluded `content` field, in characters. Kept during the
+   * content strip so callers can plan bounded reads without fetching the
+   * document text.
+   */
+  content_length?: number;
 }
 
 export async function convertDocsWithNames(
@@ -101,7 +111,16 @@ async function enhanceDocumentsArray(
   return documents
     .map((doc) => {
       const { content, ...docWithoutContent } = doc;
-      return docWithoutContent;
+      // Content is deliberately excluded (the whole point of the enhancer),
+      // but its size is metadata callers need to plan bounded reads, so it
+      // survives the strip as content_length. page_count / mime_type are
+      // passed through only when the server supplied them (list responses
+      // omit them; the detail endpoint includes them).
+      const contentLength =
+        typeof content === "string" ? content.length : undefined;
+      return contentLength === undefined
+        ? docWithoutContent
+        : { ...docWithoutContent, content_length: contentLength };
     })
     .map((doc) => ({
       ...doc,

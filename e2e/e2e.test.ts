@@ -799,6 +799,30 @@ describe("Paperless MCP E2E scenario", () => {
     assert.match(errorText(result), /definitely-not-an-option/);
   });
 
+  it("search_passages survives an apostrophe query via one sanitized retry", async () => {
+    assert.ok(state.documentId, "document must be uploaded first");
+    const result = (await client.callTool({
+      name: "search_passages",
+      arguments: { query: "E2E Document's passage" },
+    })) as ToolResult;
+    // The contract: an apostrophe query must never surface as an error.
+    // django-watson (current Paperless) rejects apostrophes with a 400, so the
+    // tool recovers via exactly one sanitized retry. If upstream ever accepts
+    // apostrophes natively, relax the query_sanitized assertion below - the
+    // not-an-error assertion stays binding either way.
+    assert.ok(!result.isError, "apostrophe query must not surface as an error");
+    const data = parseToolText(result) as {
+      query_sanitized?: boolean;
+      passages?: unknown[];
+    };
+    assert.strictEqual(
+      data.query_sanitized,
+      true,
+      "expected query_sanitized=true on the current django-watson class"
+    );
+    assert.ok(Array.isArray(data.passages), "passages array expected");
+  });
+
   it("delete_custom_field removes the select field when confirmed", async () => {
     assert.ok(state.selectFieldId, "select field must exist");
     const result = (await client.callTool({

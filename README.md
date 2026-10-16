@@ -6,6 +6,10 @@
 
 An MCP (Model Context Protocol) server for interacting with a Paperless-NGX API server. This server provides tools for managing documents, tags, correspondents, and document types in your Paperless-NGX instance.
 
+## About this fork
+
+This repository is a fork of [baruchiro/paperless-mcp](https://github.com/baruchiro/paperless-mcp) (ISC license, © Baruch Odem) maintained by Sage Labs. It adds bounded content reads — ranged `get_document_content` windows, a `search_passages` tool, an inline budget, and `content_length` metadata — so MCP agents can locate and extract document text without flooding their context. The fork point is tagged `upstream-v2.2.1`. Changes are also offered upstream via pull request.
+
 ## Quick Start
 
 [![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](https://cursor.com/install-mcp?name=paperless&config=eyJjb21tYW5kIjoibnB4IC15IEBiYXJ1Y2hpcm8vcGFwZXJsZXNzLW1jcEBsYXRlc3QiLCJlbnYiOnsiUEFQRVJMRVNTX1VSTCI6Imh0dHA6Ly95b3VyLXBhcGVybGVzcy1pbnN0YW5jZTo4MDAwIiwiUEFQRVJMRVNTX0FQSV9LRVkiOiJ5b3VyLWFwaS10b2tlbiJ9fQ%3D%3D)

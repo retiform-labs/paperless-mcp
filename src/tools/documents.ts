@@ -4,7 +4,7 @@ import { readFile, access, stat, realpath } from "fs/promises";
 import { constants } from "fs";
 import { basename, isAbsolute } from "path";
 import { convertDocsWithNames } from "../api/documentEnhancer";
-import { Document, SearchHit } from "../api/types";
+import { Document, DocumentsResponse, SearchHit } from "../api/types";
 import { PaperlessAPI } from "../api/PaperlessAPI";
 import { arrayNotEmpty } from "./utils/empty";
 import {
@@ -158,21 +158,34 @@ export function buildSearchPassage(
   content_length: number;
 } {
   const full = doc.content ?? "";
-  // Center the window on the first verbatim term occurrence; fall back to
-  // the document head when stemming produced a hit the raw text does not
-  // contain (an offset of 0 is always a valid window). The lowercase copy
-  // is taken once — documents can be hundreds of kilobytes and terms are
-  // tried in order, so a per-term toLowerCase would re-copy per term.
+  // Anchor priority: (1) the server's own highlighted phrase, (2) the first
+  // verbatim term occurrence, (3) the document head. The highlight is the
+  // only anchor that survives whoosh stemming — the search index may match
+  // word variants the stored text does not contain verbatim, and the first
+  // query term can occur anywhere in the document, so anchoring on either
+  // risks cutting a window that does not contain the actual hit.
   const lowerFull = full.toLowerCase();
-  let center = 0;
-  for (const term of terms) {
-    const idx = lowerFull.indexOf(term.toLowerCase());
-    if (idx >= 0) {
-      center = idx;
-      break;
+  let center = -1;
+  if (searchHit?.highlights) {
+    for (const phrase of extractHighlightPhrases(searchHit.highlights)) {
+      const idx = lowerFull.indexOf(phrase.toLowerCase());
+      if (idx >= 0) {
+        center = idx;
+        break;
+      }
     }
   }
-  const start = Math.max(0, center - Math.floor(window / 2));
+  if (center < 0) {
+    for (const term of terms) {
+      const idx = lowerFull.indexOf(term.toLowerCase());
+      if (idx >= 0) {
+        center = idx;
+        break;
+      }
+    }
+  }
+  const resolved = center < 0 ? 0 : center;
+  const start = Math.max(0, resolved - Math.floor(window / 2));
   const passage = full.slice(start, start + window);
   return {
     id: doc.id,
@@ -182,6 +195,41 @@ export function buildSearchPassage(
     offset: start,
     content_length: full.length,
   };
+}
+
+/**
+ * Extracts candidate anchor phrases from the server's highlight HTML: markup
+ * stripped, HTML entities decoded, whitespace collapsed. Phrases shorter than
+ * four characters cannot anchor a window reliably and are skipped so stray
+ * short matches never drag the window to a wrong position.
+ */
+export function extractHighlightPhrases(highlights: string): string[] {
+  const text = highlights
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return [];
+  // Prefer the longest surrounding run of substantial words: the hit phrase,
+  // not a lone term that can match anywhere.
+  const words = text.split(" ");
+  const phrases: string[] = [];
+  let current: string[] = [];
+  for (const word of words) {
+    if (word.length >= 4) {
+      current.push(word);
+    } else if (current.length) {
+      phrases.push(current.join(" "));
+      current = [];
+    }
+  }
+  if (current.length) phrases.push(current.join(" "));
+  return phrases.filter((phrase) => phrase.length >= 4).sort((a, b) => b.length - a.length);
 }
 
 /**
@@ -294,6 +342,68 @@ export function buildBulkEditParameters<T extends Record<string, unknown>>(
   }
 
   return apiParameters;
+}
+
+/**
+ * Defensive rewrite for django-watson full-text queries: strips apostrophes
+ * (a known server-side 400 trigger) and rebalances double quotes. Returns
+ * null when the rewrite leaves nothing searchable (caller should not retry).
+ */
+export function sanitizeFullTextQuery(query: string): string | null {
+  let cleaned = query.replace(/[\u2018\u2019']/g, "");
+  const quotes = (cleaned.match(/"/g) || []).length;
+  if (quotes % 2 === 1) {
+    cleaned = cleaned.replace(/"/g, " ");
+  }
+  cleaned = cleaned.replace(/\s+/g, " ").trim();
+  // A rewrite that leaves only operators/punctuation is not searchable.
+  if (!/[\p{L}\p{N}]/u.test(cleaned)) return null;
+  return cleaned;
+}
+
+interface SanitizedSearch {
+  response: DocumentsResponse;
+  querySanitized: boolean;
+}
+
+/**
+ * Executes a full-text search with one sanitized retry: django-watson rejects
+ * some syntactically valid queries with an opaque HTTP 400, so on a 400 the
+ * query is defensively rewritten and attempted once more. Django-ORM filter
+ * values are never rewritten — only the full-text query string. A persistent
+ * failure rethrows the original error with the attempted queries attached.
+ */
+export async function runDocumentSearch(
+  api: PaperlessAPI,
+  query: string,
+  queryParams: BuildDocumentQueryArgs = {}
+): Promise<SanitizedSearch> {
+  const attempt = (q: string) =>
+    api.getDocuments(buildDocumentQueryString({ ...queryParams, query: q }));
+  try {
+    return { response: await attempt(query), querySanitized: false };
+  } catch (error) {
+    const status = (error as { response?: { status?: number } })?.response?.status;
+    if (status !== 400) throw error;
+    const sanitized = sanitizeFullTextQuery(query);
+    if (sanitized === null || sanitized === query) {
+      throw enrichSearchError(error, [query]);
+    }
+    try {
+      return { response: await attempt(sanitized), querySanitized: true };
+    } catch (retryError) {
+      throw enrichSearchError(retryError, [query, sanitized]);
+    }
+  }
+}
+
+function enrichSearchError(error: unknown, queries: string[]): Error {
+  const base = error instanceof Error ? error.message : String(error);
+  return new Error(
+    `${base}. Paperless full-text search rejected these queries: ${queries
+      .map((q) => JSON.stringify(q))
+      .join(", ")}. Try removing quotes or apostrophes, or use query_documents with tag/correspondent filters instead.`
+  );
 }
 
 async function executeDocumentQuery(
@@ -657,11 +767,13 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
       // Each hit arrives with its full stored content, so cap the fetch at
       // the number of passages we will actually return unless the caller
       // asked for a larger scan explicitly.
-      const docsResponse = await api.getDocuments(
-        buildDocumentQueryString({
-          ...searchArgs,
-          page_size: args.page_size ?? maxPassages,
-        })
+      // The full-text query rides the same 400-resilient path as the other
+      // search tools; structured filters (in searchArgs) are never rewritten.
+      const { query: _rawQuery, ...filterArgs } = searchArgs;
+      const { response: docsResponse, querySanitized } = await runDocumentSearch(
+        api,
+        args.query,
+        { ...filterArgs, page_size: args.page_size ?? maxPassages }
       );
       const passages = (docsResponse.results || [])
         .slice(0, maxPassages)
@@ -673,6 +785,7 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
             text: JSON.stringify({
               query: args.query,
               total_hits: docsResponse.count,
+              ...(querySanitized ? { query_sanitized: true } : {}),
               passages,
             }),
           },

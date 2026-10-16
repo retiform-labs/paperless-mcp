@@ -14,6 +14,8 @@ import {
   getMaxInlineChars,
   registerDocumentTools,
   resolveBoundedRead,
+  runDocumentSearch,
+  sanitizeFullTextQuery,
   sliceDocumentContent,
 } from "./documents";
 import { createDocument } from "../test/mocks/paperlessApi";
@@ -283,6 +285,174 @@ describe("buildSearchPassage", () => {
     const passage = buildSearchPassage(doc, ["plain"], 100);
     assert.ok(!("score" in passage));
     assert.ok(!("highlights" in passage));
+  });
+});
+
+describe("buildSearchPassage highlight anchoring (live failure shapes)", () => {
+  test("anchors on the highlighted phrase when the first query term occurs earlier in the doc", () => {
+    // Live shape 1: common word ("best") appears at doc head; the real hit
+    // ("minimize ejaculation") is far later, where the server highlighted it.
+    const early = `the best documents are best read in the morning. `;
+    const far = "z".repeat(2000);
+    const hitText = `people concerned about it often think the best thing to do is minimize ejaculation of energy.`;
+    const doc = createDocument({ content: early + far + hitText + far });
+    const passage = buildSearchPassage(
+      doc,
+      ["best", "thing", "for", "them", "to", "do", "is", "minimize", "ejaculation", "of", "energy"],
+      800,
+      { score: 18.5, highlights: "the <b>best</b> thing for them to do is <b>minimize</b> <b>ejaculation</b>" }
+    );
+    // The window must contain the highlighted phrase, not merely the first
+    // verbatim occurrence of the first term.
+    assert.ok(
+      passage.passage.includes("minimize ejaculation"),
+      `window anchored at ${passage.offset} missed the highlight`
+    );
+    assert.ok(passage.offset >= early.length, "window should anchor at the highlight, not the first 'best'");
+  });
+
+  test("anchors on the highlighted phrase when stemming produced a hit absent from the raw text", () => {
+    // Live shape 2: whoosh matched "minimal"; the doc contains "minimize" only.
+    const doc = createDocument({ content: `x`.repeat(1000) + `the best thing to do is minimize ejaculation today.` });
+    const passage = buildSearchPassage(
+      doc,
+      ["minimal", "ejaculation"],
+      400,
+      { score: 12.0, highlights: "...the best thing to do is <b>minimize</b> <b>ejaculation</b> today..." }
+    );
+    assert.ok(passage.passage.includes("minimize ejaculation"));
+    // Centered window may start before the phrase; the assertion is that the
+    // window sits at the hit (deep in the doc), not at the head.
+    assert.ok(passage.offset >= 800, `offset ${passage.offset}`);
+  });
+
+  test("decodes entities and tolerates markup variants in highlights", () => {
+    const doc = createDocument({ content: `y`.repeat(900) + `fish and chips &amp; gravy nightly` });
+    const passage = buildSearchPassage(doc, ["fish"], 300, {
+      score: 3,
+      highlights: "<mark>fish</mark> and chips &amp; gravy",
+    });
+    assert.ok(passage.passage.includes("fish and chips"), `offset ${passage.offset}`);
+  });
+
+  test("skips very short highlight matches that cannot anchor", () => {
+    const doc = createDocument({ content: `head a b here ${"w".repeat(800)} a rare anchoring phrase tail` });
+    const passage = buildSearchPassage(doc, ["a", "rare"], 300, {
+      score: 5,
+      highlights: "a <b>rare</b> <b>a</b> phrase",
+    });
+    assert.ok(passage.passage.includes("rare anchoring phrase"), `offset ${passage.offset}`);
+  });
+
+  test("falls back to verbatim term anchoring when the highlight text is absent", () => {
+    const doc = createDocument({ content: `${"k".repeat(600)} findme soon ${"k".repeat(300)}` });
+    const passage = buildSearchPassage(doc, ["findme"], 200, {
+      score: 2,
+      highlights: "<b>completely different text</b>",
+    });
+    assert.ok(passage.passage.includes("findme"));
+  });
+
+  test("falls back to the document head when there is no hit and nothing matches", () => {
+    const doc = createDocument({ content: "z".repeat(2000) });
+    const passage = buildSearchPassage(doc, ["missing"], 300, {
+      score: 1,
+      highlights: "<b>unfindable</b>",
+    });
+    assert.equal(passage.offset, 0);
+  });
+});
+
+describe("sanitizeFullTextQuery", () => {
+  test("strips apostrophes (django-watson 400 source)", () => {
+    assert.equal(sanitizeFullTextQuery("God's favorite prayer"), "Gods favorite prayer");
+  });
+
+  test("drops all quotes when the count is unbalanced", () => {
+    assert.equal(sanitizeFullTextQuery('say "hello world'), "say hello world");
+    assert.equal(sanitizeFullTextQuery('odd "quote and "two" here'), "odd quote and two here");
+  });
+
+  test("leaves balanced quotes and clean queries untouched", () => {
+    assert.equal(sanitizeFullTextQuery('"barber pole" worms'), '"barber pole" worms');
+    assert.equal(sanitizeFullTextQuery("plain terms"), "plain terms");
+  });
+
+  test("keeps a searchable stem after apostrophe removal", () => {
+    assert.equal(sanitizeFullTextQuery("it's"), "its");
+  });
+
+  test("returns null when nothing searchable remains", () => {
+    assert.equal(sanitizeFullTextQuery('   '), null);
+    assert.equal(sanitizeFullTextQuery('"'), null);
+  });
+
+  test("collapses whitespace left by removals", () => {
+    assert.equal(sanitizeFullTextQuery("what's   new"), "whats new");
+  });
+});
+
+describe("runDocumentSearch (400 resilience)", () => {
+  function createFailingSearchApi(
+    failOn: string,
+    succeedWith: { count: number; all: number[]; results: Document[] },
+    log: { queries: string[] }
+  ): PaperlessAPI {
+    return {
+      getDocuments: async (query: string) => {
+        log.queries.push(query);
+        if (query.includes(failOn)) {
+          const err = new Error(
+            "Request failed with status code 400"
+          ) as Error & { isAxiosError?: boolean; response?: { status: number; data: unknown } };
+          err.isAxiosError = true;
+          err.response = { status: 400, data: { detail: "Error listing search results, check logs for more detail." } };
+          throw err;
+        }
+        return succeedWith as never;
+      },
+      getCorrespondents: async () => ({ results: [] }),
+      getDocumentTypes: async () => ({ results: [] }),
+      getTags: async () => ({ results: [] }),
+      getCustomFields: async () => ({ results: [] }),
+    } as unknown as PaperlessAPI;
+  }
+
+  test("retries a sanitized query when the raw query 400s", async () => {
+    const log = { queries: [] as string[] };
+    const hit = createDocument({ content: `answer here ${"f".repeat(400)}` });
+    const api = createFailingSearchApi("%27", { count: 1, all: [hit.id], results: [hit] }, log);
+    const out = await runDocumentSearch(api, "God's favorite prayer");
+    assert.equal(out.querySanitized, true);
+    assert.equal(out.response.results.length, 1);
+    assert.ok(log.queries[0].includes("God%27s"), "first attempt must be the raw query");
+    assert.ok(!log.queries[1].includes("'"), "retry must be sanitized");
+  });
+
+  test("returns query_sanitized false when the raw query succeeds", async () => {
+    const log = { queries: [] as string[] };
+    const hit = createDocument({ content: "plain content" });
+    const api = createFailingSearchApi("NEVER-MATCHES", { count: 1, all: [hit.id], results: [hit] }, log);
+    const out = await runDocumentSearch(api, "plain terms");
+    assert.equal(out.querySanitized, false);
+    assert.equal(log.queries.length, 1);
+  });
+
+  test("surfaces a structured error when the sanitized retry also fails", async () => {
+    const log = { queries: [] as string[] };
+    const api = createFailingSearchApi("q", { count: 0, all: [], results: [] }, log);
+    await assert.rejects(
+      () => runDocumentSearch(api, "totally broken q'tery"),
+      /400/
+    );
+    assert.equal(log.queries.length, 2, "expected raw attempt + one sanitized retry");
+  });
+
+  test("does not retry when sanitization has nothing to fix", async () => {
+    const log = { queries: [] as string[] };
+    const api = createFailingSearchApi("q", { count: 0, all: [], results: [] }, log);
+    await assert.rejects(() => runDocumentSearch(api, "clean query"), /400/);
+    assert.equal(log.queries.length, 1, "no retry when the query was already clean");
   });
 });
 

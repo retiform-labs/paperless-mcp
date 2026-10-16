@@ -135,13 +135,14 @@ export function sliceDocumentContent(
 }
 
 /**
- * Builds one bounded passage of document content centered on a search-term
- * occurrence.
+ * Builds one bounded passage of document content centered on the actual hit.
  *
  * The window is cut from the stored content server-side; the full text never
- * crosses this boundary un-sliced. When the query term cannot be located
- * verbatim (whoosh stems differently than the stored text), the passage falls
- * back to the head of the document rather than returning nothing.
+ * crosses this boundary un-sliced. Anchoring prefers the server's own
+ * highlighted phrase — the only anchor that survives whoosh stemming, since
+ * the index may match word variants the stored text does not contain
+ * verbatim — then falls back to the first verbatim term occurrence, and
+ * finally to the head of the document rather than returning nothing.
  */
 export function buildSearchPassage(
   doc: Pick<Document, "id" | "title" | "content">,

@@ -4,6 +4,7 @@ import { readFile, access, stat, realpath } from "fs/promises";
 import { constants } from "fs";
 import { basename, isAbsolute } from "path";
 import { convertDocsWithNames } from "../api/documentEnhancer";
+import { Document, SearchHit } from "../api/types";
 import { PaperlessAPI } from "../api/PaperlessAPI";
 import { arrayNotEmpty } from "./utils/empty";
 import {
@@ -39,6 +40,159 @@ const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024;
 const ALLOWED_UPLOAD_PATHS = process.env.PAPERLESS_MCP_UPLOAD_PATHS
   ? process.env.PAPERLESS_MCP_UPLOAD_PATHS.split(":")
   : [];
+
+/** Default number of characters returned by a bounded content read. */
+export const DEFAULT_CONTENT_MAX_CHARS = 8000;
+
+/** Hard cap on characters a single tool response may inline. */
+export const DEFAULT_MAX_INLINE_CHARS = 50000;
+
+/** Default passage size for search_passages. */
+export const DEFAULT_PASSAGE_WINDOW = 800;
+
+/** Default maximum number of passages returned by search_passages. */
+export const DEFAULT_MAX_PASSAGES = 5;
+
+/**
+ * Reads the inline budget from the environment at call time (not module
+ * load), so tests can exercise different budgets without re-importing.
+ */
+export function getMaxInlineChars(): number {
+  const parsed = Number.parseInt(
+    process.env.PAPERLESS_MCP_MAX_INLINE_CHARS ?? "",
+    10
+  );
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_MAX_INLINE_CHARS;
+}
+
+/**
+ * Normalizes bounded-read arguments into a validated {offset, maxChars} pair.
+ *
+ * Invariants:
+ * - offset must be >= 0 and inside the document;
+ * - maxChars is clamped to [1, budget] where budget is the inline budget;
+ * - a caller-requested window beyond the budget fails loudly instead of
+ *   silently shrinking (never silently slice what the caller asked for).
+ */
+export function resolveBoundedRead(
+  offset: number | undefined,
+  maxChars: number | undefined,
+  contentLength: number,
+  budget = getMaxInlineChars()
+): { offset: number; maxChars: number } {
+  const resolvedOffset = Math.max(0, Math.floor(offset ?? 0));
+  if (resolvedOffset > 0 && resolvedOffset >= contentLength) {
+    throw new Error(
+      `offset ${resolvedOffset} is beyond the end of the document (content_length ${contentLength})`
+    );
+  }
+  const requested = maxChars ?? DEFAULT_CONTENT_MAX_CHARS;
+  if (requested > budget) {
+    throw new Error(
+      `max_chars ${requested} exceeds the inline budget ${budget} ` +
+        `(PAPERLESS_MCP_MAX_INLINE_CHARS). Read in windows of <= ${budget} chars ` +
+        `using offset, or use the download_document resource for bulk access.`
+    );
+  }
+  const clamped = Math.max(1, Math.floor(requested));
+  return { offset: resolvedOffset, maxChars: clamped };
+}
+
+/**
+ * Extracts a bounded window of document content and describes it.
+ *
+ * The window is always derived from the stored content server-side; the full
+ * text never crosses this boundary un-sliced.
+ */
+export function sliceDocumentContent(
+  doc: Pick<Document, "id" | "title" | "content">,
+  offset: number,
+  maxChars: number
+): {
+  id: number;
+  title: string;
+  content: string;
+  offset: number;
+  returned_chars: number;
+  content_length: number;
+  truncated: boolean;
+  has_more: boolean;
+} {
+  const full = doc.content ?? "";
+  const window = full.slice(offset, offset + maxChars);
+  return {
+    id: doc.id,
+    title: doc.title,
+    content: window,
+    offset,
+    returned_chars: window.length,
+    content_length: full.length,
+    truncated: offset + window.length < full.length,
+    has_more: offset + window.length < full.length,
+  };
+}
+
+/**
+ * Builds one bounded passage of document content centered on a search-term
+ * occurrence.
+ *
+ * The window is cut from the stored content server-side; the full text never
+ * crosses this boundary un-sliced. When the query term cannot be located
+ * verbatim (whoosh stems differently than the stored text), the passage falls
+ * back to the head of the document rather than returning nothing.
+ */
+export function buildSearchPassage(
+  doc: Pick<Document, "id" | "title" | "content">,
+  terms: string[],
+  window: number,
+  searchHit?: Pick<SearchHit, "score" | "highlights">
+): {
+  id: number;
+  title: string;
+  score?: number;
+  highlights?: string;
+  passage: string;
+  offset: number;
+  content_length: number;
+} {
+  const full = doc.content ?? "";
+  // Center the window on the first verbatim term occurrence; fall back to
+  // the document head when stemming produced a hit the raw text does not
+  // contain (an offset of 0 is always a valid window).
+  let center = 0;
+  for (const term of terms) {
+    const idx = full.toLowerCase().indexOf(term.toLowerCase());
+    if (idx >= 0) {
+      center = idx;
+      break;
+    }
+  }
+  const start = Math.max(0, center - Math.floor(window / 2));
+  const passage = full.slice(start, start + window);
+  return {
+    id: doc.id,
+    title: doc.title,
+    ...(searchHit ? { score: searchHit.score, highlights: searchHit.highlights } : {}),
+    passage,
+    offset: start,
+    content_length: full.length,
+  };
+}
+
+/**
+ * Splits a full-text query into lowercase search terms for passage location.
+ * Extracts word characters so operators and quoting from the query syntax do
+ * not pollute the verbatim lookup.
+ */
+export function extractSearchTerms(query: string): string[] {
+  const terms = query
+    .toLowerCase()
+    .split(/[^\w]+/)
+    .filter((term) => term.length > 0);
+  return terms;
+}
 
 /** Validates that a file path is safe to read for document upload. */
 export async function validateFilePath(filePath: string): Promise<void> {
@@ -440,6 +594,88 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
   );
 
   server.tool(
+    "search_passages",
+    "Search documents full-text and return bounded text passages around each hit instead of whole documents. Locates the query terms in each matching document's stored content, cuts a window (default 800 chars) around the first occurrence, and returns it with the document id, title, score, offset, content_length, and the server's own highlighted snippet. Use this to locate and skim evidence across many documents without flooding context; page further with get_document_content offsets.",
+    {
+      query: z
+        .string()
+        .min(1)
+        .describe("Full-text query (same syntax as query_documents)."),
+      window: z
+        .number()
+        .int()
+        .min(200)
+        .max(4000)
+        .optional()
+        .describe("Characters per passage (default 800)."),
+      max_passages: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("Maximum passages to return (default 5)."),
+      page_size: z.number().optional(),
+      correspondent: z.number().optional(),
+      document_type: z.number().optional(),
+      tag: z.number().optional(),
+      storage_path: z.number().optional(),
+      created__date__gte: z.string().optional(),
+      created__date__lte: z.string().optional(),
+      ordering: z.string().optional(),
+      custom_fields__icontains: z.string().optional(),
+      paperless_filters: z
+        .record(
+          z.string(),
+          z.union([
+            z.string(),
+            z.number(),
+            z.boolean(),
+            z.array(z.union([z.string(), z.number(), z.boolean()])),
+          ])
+        )
+        .optional(),
+    },
+    withErrorHandling(async (args, extra) => {
+      if (!api) throw new Error("Please configure API connection first");
+      const terms = extractSearchTerms(args.query);
+      // Reuse the same query-string builder as query_documents so filters
+      // behave identically; page_size bounds how many documents are scanned.
+      const queryString = buildDocumentQueryString({
+        query: args.query,
+        page_size: args.page_size,
+        correspondent: args.correspondent,
+        document_type: args.document_type,
+        tag: args.tag,
+        storage_path: args.storage_path,
+        created__date__gte: args.created__date__gte,
+        created__date__lte: args.created__date__lte,
+        ordering: args.ordering,
+        custom_fields__icontains: args.custom_fields__icontains,
+        paperless_filters: args.paperless_filters,
+      });
+      const docsResponse = await api.getDocuments(queryString);
+      const window = args.window ?? DEFAULT_PASSAGE_WINDOW;
+      const maxPassages = args.max_passages ?? DEFAULT_MAX_PASSAGES;
+      const passages = (docsResponse.results || [])
+        .slice(0, maxPassages)
+        .map((doc) => buildSearchPassage(doc, terms, window, doc.__search_hit__));
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              query: args.query,
+              total_hits: docsResponse.count,
+              passages,
+            }),
+          },
+        ],
+      };
+    })
+  );
+
+  server.tool(
     "query_documents",
     "Query documents using the full-text query engine plus structured Paperless filters. Use this for complex filtering, custom field conditions, or any documented /api/documents/ query parameters that are not exposed as first-class arguments. Prefer the dedicated top-level arguments where available. custom_field_query supports [field_name_or_id, operator, value] leaves or ['AND'|'OR', [clause1, clause2]] groups. Note: Document content is excluded from results by default. Use 'get_document_content' when you need the document text.",
     QUERY_DOCUMENTS_ARGS_SHAPE,
@@ -464,22 +700,39 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
 
   server.tool(
     "get_document_content",
-    "Get the text content of a specific document by ID. Use this when you need to read or analyze the actual document text.",
+    "Get the text content of a specific document by ID, in bounded windows. Returns at most max_chars characters (default 8000) starting at offset, plus content_length and pagination metadata so callers can page through long documents. Use offset + max_chars to read successive windows of a long document; use the download_document resource for bulk access to the raw file.",
     {
       id: z.number(),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Character offset to start reading from (default 0)."),
+      max_chars: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe(
+          "Maximum characters to return (default 8000). Requests above the inline budget fail with the document size instead of returning everything."
+        ),
     },
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");
       const doc = await api.getDocument(args.id);
+      const { offset, maxChars } = resolveBoundedRead(
+        args.offset,
+        args.max_chars,
+        doc.content?.length ?? 0
+      );
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({
-              id: doc.id,
-              title: doc.title,
-              content: doc.content,
-            }),
+            text: JSON.stringify(
+              sliceDocumentContent(doc, offset, maxChars)
+            ),
           },
         ],
       };

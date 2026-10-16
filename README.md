@@ -68,6 +68,7 @@ Add these to your MCP config file:
 | `PAPERLESS_PUBLIC_URL` | No | `PAPERLESS_URL` | Public-facing URL for document links |
 | `PAPERLESS_API_VERSION` | No | `9` | Paperless-ngx REST API version. `9` works on Paperless-ngx v2.x (recent) and v3.x. Paperless-ngx v3.0.0 dropped support for versions below `9`, so older defaults now return HTTP 406. If you see HTTP 406 errors, set this to a version your server supports. |
 | `PAPERLESS_MCP_UPLOAD_PATHS` | No | — | Colon-separated list of allowed directories for `file_path` uploads. **Recommended for security.** Example: `/var/uploads:/tmp/scans` |
+| `PAPERLESS_MCP_MAX_INLINE_CHARS` | No | `50000` | Hard cap on characters a single tool response may inline. Requests above the budget fail with the document size and a hint toward bounded reads instead of silently truncating or flooding context. |
 
 That's it! Now you can ask Claude to help you manage your Paperless-NGX documents.
 
@@ -199,6 +200,39 @@ search_documents({
   query: "invoice 2024"
 })
 ```
+
+#### get_document_content
+Get the text content of a document by ID **in bounded windows**. Returns at most `max_chars` characters (default 8000) starting at `offset`, plus pagination metadata so callers can page through long documents without flooding context.
+
+Parameters:
+- id: Document ID
+- offset (optional): Character offset to start reading from (default 0)
+- max_chars (optional): Maximum characters to return (default 8000)
+
+```typescript
+get_document_content({ id: 123 })
+// → { content: "<first 8000 chars>", offset: 0, content_length: 726573, returned_chars: 8000, truncated: true, has_more: true }
+
+get_document_content({ id: 123, offset: 8000, max_chars: 8000 })
+// → next window
+```
+
+Requests above the inline budget (`PAPERLESS_MCP_MAX_INLINE_CHARS`, default 50000) fail with the document size and a hint toward offset reads or the `download_document` resource — never a silent slice, never an unbounded return. The response always carries `content_length`, `truncated`, and `has_more` so callers can page deterministically.
+
+#### search_passages
+Search documents full-text and return **bounded text passages around each hit** instead of whole documents. Locates the query terms in each matching document's stored content, cuts a window around the first occurrence, and returns it with the document id, title, score, offset, `content_length`, and the server's own highlighted snippet.
+
+Parameters:
+- query: Search query string (same syntax as `query_documents`)
+- window (optional): Characters per passage (default 800, range 200–4000)
+- max_passages (optional): Maximum passages to return (default 5, cap 20)
+
+```typescript
+search_passages({ query: "invoice 2024" })
+// → { query: "invoice 2024", total_hits: 3, passages: [{ id, title, score, highlights, passage, offset, content_length }, ...] }
+```
+
+Use this to locate and skim evidence across many documents in a single call; page further into a hit with `get_document_content` offsets. Standard `query_documents` filters (`correspondent`, `tag`, `document_type`, `storage_path`, date ranges, `paperless_filters`) are accepted and behave identically.
 
 #### download_document
 Download a document file by ID.

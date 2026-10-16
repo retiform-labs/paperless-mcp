@@ -224,7 +224,9 @@ get_document_content({ id: 123, offset: 8000, max_chars: 8000 })
 Requests above the inline budget (`PAPERLESS_MCP_MAX_INLINE_CHARS`, default 50000) fail with the document size and a hint toward offset reads or the `download_document` resource — never a silent slice, never an unbounded return. The response always carries `content_length`, `truncated`, and `has_more` so callers can page deterministically.
 
 #### search_passages
-Search documents full-text and return **bounded text passages around each hit** instead of whole documents. Locates the query terms in each matching document's stored content, cuts a window around the first occurrence, and returns it with the document id, title, score, offset, `content_length`, and the server's own highlighted snippet.
+Search documents full-text and return **bounded text passages around each hit** instead of whole documents. Each window is anchored on the server's own highlighted phrase (falling back to the first verbatim term occurrence, then the document head), so the returned passage contains the actual hit even when the search index stemmed a word variant that does not appear verbatim in the stored text. Returns the document id, title, score, offset, `content_length`, and the highlighted snippet.
+
+Queries that the server rejects with an opaque HTTP 400 (django-watson rejects some syntactically valid queries, notably those containing apostrophes) are retried once with a defensively rewritten query — apostrophes and stray quotes removed; structured filter values are never rewritten. Responses from a rewritten retry carry `query_sanitized: true`. Persistent failures throw a structured error naming every attempted query.
 
 Parameters:
 - query: Search query string (same syntax as `query_documents`)
@@ -234,9 +236,12 @@ Parameters:
 ```typescript
 search_passages({ query: "invoice 2024" })
 // → { query: "invoice 2024", total_hits: 3, passages: [{ id, title, score, highlights, passage, offset, content_length }, ...] }
+
+search_passages({ query: "God's will" })
+// → { ..., query_sanitized: true, ... }  // apostrophe stripped on retry after a 400
 ```
 
-Use this to locate and skim evidence across many documents in a single call; page further into a hit with `get_document_content` offsets. Standard `query_documents` filters (`correspondent`, `tag`, `document_type`, `storage_path`, date ranges, `paperless_filters`) are accepted and behave identically.
+Use this to locate and skim evidence across many documents in a single call; page further into a hit with `get_document_content` offsets. Standard `query_documents` filters (`correspondent`, `tag`, `document_type`, `storage_path`, date ranges, `paperless_filters`) are accepted and behave identically. Note: `total_hits` reflects the server's OR-expanded match count and may exceed the number of top-ranked passages returned.
 
 #### download_document
 Download a document file by ID.

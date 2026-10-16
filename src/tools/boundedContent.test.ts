@@ -231,6 +231,11 @@ describe("extractSearchTerms", () => {
     ]);
   });
 
+  test("keeps accented and non-Latin terms intact", () => {
+    assert.deepEqual(extractSearchTerms("café"), ["café"]);
+    assert.deepEqual(extractSearchTerms("kuji-in 九字"), ["kuji", "in", "九字"]);
+  });
+
   test("drops empty fragments", () => {
     assert.deepEqual(extractSearchTerms("  -- ?? "), []);
   });
@@ -397,6 +402,38 @@ describe("search_passages", () => {
       const parsed = parseToolText(result);
       assert.equal(parsed.total_hits, 8);
       assert.equal(parsed.passages.length, 3);
+    });
+  });
+
+  test("caps the fetch at max_passages unless page_size is explicit", async () => {
+    const hit = createDocument({
+      content: `${"f".repeat(300)} findme ${"f".repeat(300)}`,
+      __search_hit__: { score: 1, highlights: "", note_highlights: "", rank: 1 },
+    });
+    const { api, getDocumentsQueries } = createSearchApi(hit);
+    await withDocumentClient(api, async (client) => {
+      const result = (await client.callTool({
+        name: "search_passages",
+        arguments: { query: "findme", max_passages: 2 },
+      })) as CallToolResult;
+      assert.ok(!result.isError, parseToolText(result)?.error);
+      assert.match(getDocumentsQueries[0], /page_size=2/);
+    });
+  });
+
+  test("an explicit page_size overrides the passage cap", async () => {
+    const hit = createDocument({
+      content: `${"g".repeat(300)} findme ${"g".repeat(300)}`,
+      __search_hit__: { score: 1, highlights: "", note_highlights: "", rank: 1 },
+    });
+    const { api, getDocumentsQueries } = createSearchApi(hit);
+    await withDocumentClient(api, async (client) => {
+      const result = (await client.callTool({
+        name: "search_passages",
+        arguments: { query: "findme", page_size: 10 },
+      })) as CallToolResult;
+      assert.ok(!result.isError, parseToolText(result)?.error);
+      assert.match(getDocumentsQueries[0], /page_size=10/);
     });
   });
 

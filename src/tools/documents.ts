@@ -160,10 +160,13 @@ export function buildSearchPassage(
   const full = doc.content ?? "";
   // Center the window on the first verbatim term occurrence; fall back to
   // the document head when stemming produced a hit the raw text does not
-  // contain (an offset of 0 is always a valid window).
+  // contain (an offset of 0 is always a valid window). The lowercase copy
+  // is taken once — documents can be hundreds of kilobytes and terms are
+  // tried in order, so a per-term toLowerCase would re-copy per term.
+  const lowerFull = full.toLowerCase();
   let center = 0;
   for (const term of terms) {
-    const idx = full.toLowerCase().indexOf(term.toLowerCase());
+    const idx = lowerFull.indexOf(term.toLowerCase());
     if (idx >= 0) {
       center = idx;
       break;
@@ -183,13 +186,14 @@ export function buildSearchPassage(
 
 /**
  * Splits a full-text query into lowercase search terms for passage location.
- * Extracts word characters so operators and quoting from the query syntax do
- * not pollute the verbatim lookup.
+ * Extracts letter/number runs (Unicode-aware, so accented and non-Latin terms
+ * survive intact) so operators and quoting from the query syntax do not
+ * pollute the verbatim lookup.
  */
 export function extractSearchTerms(query: string): string[] {
   const terms = query
     .toLowerCase()
-    .split(/[^\w]+/)
+    .split(/[^\p{L}\p{N}_]+/u)
     .filter((term) => term.length > 0);
   return terms;
 }
@@ -641,22 +645,24 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
       const terms = extractSearchTerms(args.query);
       // Reuse the same query-string builder as query_documents so filters
       // behave identically; page_size bounds how many documents are scanned.
-      const queryString = buildDocumentQueryString({
-        query: args.query,
-        page_size: args.page_size,
-        correspondent: args.correspondent,
-        document_type: args.document_type,
-        tag: args.tag,
-        storage_path: args.storage_path,
-        created__date__gte: args.created__date__gte,
-        created__date__lte: args.created__date__lte,
-        ordering: args.ordering,
-        custom_fields__icontains: args.custom_fields__icontains,
-        paperless_filters: args.paperless_filters,
-      });
-      const docsResponse = await api.getDocuments(queryString);
+      // window / max_passages are tool-only knobs; everything else in args
+      // (including the query itself) is a valid query_documents parameter.
+      const {
+        window: _window,
+        max_passages: _maxPassages,
+        ...searchArgs
+      } = args;
       const window = args.window ?? DEFAULT_PASSAGE_WINDOW;
       const maxPassages = args.max_passages ?? DEFAULT_MAX_PASSAGES;
+      // Each hit arrives with its full stored content, so cap the fetch at
+      // the number of passages we will actually return unless the caller
+      // asked for a larger scan explicitly.
+      const docsResponse = await api.getDocuments(
+        buildDocumentQueryString({
+          ...searchArgs,
+          page_size: args.page_size ?? maxPassages,
+        })
+      );
       const passages = (docsResponse.results || [])
         .slice(0, maxPassages)
         .map((doc) => buildSearchPassage(doc, terms, window, doc.__search_hit__));

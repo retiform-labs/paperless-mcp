@@ -8,7 +8,7 @@ An MCP (Model Context Protocol) server for interacting with a Paperless-NGX API 
 
 ## About this fork
 
-This repository is a fork of [baruchiro/paperless-mcp](https://github.com/baruchiro/paperless-mcp) (ISC license, © Baruch Odem) maintained by Sage Labs. It adds bounded content reads — ranged `get_document_content` windows, a `search_passages` tool, an inline budget, and `content_length` metadata — so MCP agents can locate and extract document text without flooding their context. The fork point is tagged `upstream-v2.2.1`. Changes are also offered upstream via pull request.
+This repository is a fork of [baruchiro/paperless-mcp](https://github.com/baruchiro/paperless-mcp) (ISC license, © Baruch Odem) maintained by Retiform Labs. It adds bounded content reads — ranged `get_document_content` windows, a `search_passages` tool, an inline budget, and `content_length` metadata — so MCP agents can locate and extract document text without flooding their context. The fork point is tagged `upstream-v2.2.1`. Changes are also offered upstream via pull request.
 
 ## Quick Start
 

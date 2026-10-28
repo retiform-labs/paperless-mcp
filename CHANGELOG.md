@@ -1,5 +1,18 @@
 # @baruchiro/paperless-mcp
 
+## 2.3.0
+
+### Minor Changes
+
+- 3ed6444: Bound document content responses: `get_document_content` now returns bounded windows (default 8000 chars) with `offset`/`max_chars` pagination and honest metadata (`content_length`, `truncated`, `has_more`), requests above the new `PAPERLESS_MCP_MAX_INLINE_CHARS` budget (default 50000) fail loudly instead of returning the whole document, and a new `search_passages` tool returns bounded passages around full-text hits with score/highlight/offset metadata. List/query/get results now carry `content_length`.
+
+### Patch Changes
+
+- ef0a1e6: Anchor `search_passages` windows on the server's own highlight (falling back to verbatim terms, then the document head) so returned passages contain the actual hit even when stemming matched a word variant absent from the stored text. Full-text queries rejected by the server with an HTTP 400 are retried once with a defensively sanitized query (apostrophes and stray quotes removed; filter values untouched); such responses carry `query_sanitized: true` and persistent failures name every attempted query. The npm `test` script glob is quoted so nested `src/tools/utils` suites actually run.
+- 54b0bc5: Move `typescript` from `dependencies` to `devDependencies`
+
+  The compiled entrypoint (`build/index.js`) doesn't need the TypeScript compiler at runtime, but it was declared as a production dependency, so it shipped in the production container image even after pruning devDependencies. It now stays out of a `--omit=dev` install.
+
 ## 2.2.1
 
 ### Patch Changes

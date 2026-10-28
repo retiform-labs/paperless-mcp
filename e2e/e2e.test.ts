@@ -805,20 +805,21 @@ describe("Paperless MCP E2E scenario", () => {
       name: "search_passages",
       arguments: { query: "E2E Document's passage" },
     })) as ToolResult;
-    // The contract: an apostrophe query must never surface as an error.
-    // django-watson (current Paperless) rejects apostrophes with a 400, so the
-    // tool recovers via exactly one sanitized retry. If upstream ever accepts
-    // apostrophes natively, relax the query_sanitized assertion below - the
-    // not-an-error assertion stays binding either way.
+    // The contract: an apostrophe query must never surface as an error, and
+    // when a retry happens it must be the sanitized one. Both upstream
+    // behaviours are correct: older django-watson rejects the raw query with
+    // a 400 and the tool recovers via exactly one sanitized retry
+    // (query_sanitized: true), while newer django-watson accepts the query
+    // natively so no retry occurs and the field is absent. Only a retry with
+    // an unsanitized query would violate the contract.
     assert.ok(!result.isError, "apostrophe query must not surface as an error");
     const data = parseToolText(result) as {
       query_sanitized?: boolean;
       passages?: unknown[];
     };
-    assert.strictEqual(
-      data.query_sanitized,
-      true,
-      "expected query_sanitized=true on the current django-watson class"
+    assert.ok(
+      data.query_sanitized === undefined || data.query_sanitized === true,
+      "a retry, if one occurred, must be the sanitized one; native acceptance leaves query_sanitized absent",
     );
     assert.ok(Array.isArray(data.passages), "passages array expected");
   });

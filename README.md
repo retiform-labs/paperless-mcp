@@ -30,8 +30,9 @@ way to ask for a slice. This fork adds bounded reads:
   instead of returning a hard 400.
 
 We also fix the build so it is idempotent (`tsc` no longer consumes its own
-`.d.ts` output on a rebuild). The bounded-read work is offered upstream by pull
-request; it is published here in the meantime because agentic clients need it now.
+`.d.ts` output on a rebuild). Upstream was unable to take this work, and agentic
+clients need it now, so it is published here. The delta from `upstream-v2.2.1`
+is small and self-contained if upstream ever wants it.
 
 ## Quick Start
 

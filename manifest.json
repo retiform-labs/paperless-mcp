@@ -1,22 +1,24 @@
 {
   "dxt_version": "0.1",
-  "name": "@baruchiro/paperless-mcp",
+  "name": "@retiform/paperless-mcp",
   "display_name": "Paperless-ngx",
-  "version": "0.0.2",
+  "version": "2.3.1",
   "description": "Model Context Protocol (MCP) server for interacting with Paperless-NGX document management system. Enables AI assistants to manage documents, tags, correspondents, and document types through the Paperless-NGX API.",
   "author": {
-    "name": "Baruch Odem"
+    "name": "Guan",
+    "email": "guan@retiform.dev"
   },
-  "homepage": "https://github.com/baruchiro/paperless-mcp",
-  "documentation": "https://github.com/baruchiro/paperless-mcp",
-  "support": "https://github.com/baruchiro/paperless-mcp",
-
+  "homepage": "https://github.com/retiform-labs/paperless-mcp",
+  "documentation": "https://github.com/retiform-labs/paperless-mcp",
+  "support": "https://github.com/retiform-labs/paperless-mcp",
   "server": {
     "type": "node",
     "entry_point": "build/index.js",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/build/index.js"],
+      "args": [
+        "${__dirname}/build/index.js"
+      ],
       "env": {
         "PAPERLESS_URL": "${user_config.url}",
         "PAPERLESS_API_KEY": "${user_config.api_key}"
@@ -105,6 +107,6 @@
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/baruchiro/paperless-mcp.git"
+    "url": "git+https://github.com/retiform-labs/paperless-mcp.git"
   }
 }

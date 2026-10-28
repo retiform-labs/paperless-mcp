@@ -1,4 +1,24 @@
-# @baruchiro/paperless-mcp
+# @retiform/paperless-mcp
+
+> **Fork notice.** This package was published as `@baruchiro/paperless-mcp` up
+> to and including 2.3.0. From 2.3.1 it is published as
+> `@retiform/paperless-mcp` by Retiform Labs, continuing from upstream 2.2.1
+> (tag `upstream-v2.2.1`) plus the bounded-read work recorded at 2.3.0.
+> Entries at 2.2.1 and below are upstream's history, preserved verbatim.
+> 2.3.0 is ours: merged here, never published at the upstream scope.
+
+## 2.3.1
+
+### Patch Changes
+
+- Publish under the `@retiform` scope. The bounded-read changes are agentic-work
+  improvements that were never released upstream, and the package could not be
+  published to the upstream scope. Code content is unchanged from 2.3.0.
+
+- Fix a non-idempotent build: `tsconfig.json` set `outDir` and `declarationDir`
+  to `./build` with no `include`, so a second `tsc` run read its own emitted
+  `.d.ts` files as inputs and failed with `TS5055`. A fresh checkout always hid
+  this; every local rebuild hit it. `prepack` now clears `build/` first.
 
 ## 2.3.0
 

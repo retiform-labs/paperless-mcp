@@ -2,17 +2,40 @@
 
 # Paperless-NGX MCP Server
 
-![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/baruchiro/paperless-mcp?utm_source=oss&utm_medium=github&utm_campaign=baruchiro%2Fpaperless-mcp&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/retiform-labs/paperless-mcp?utm_source=oss&utm_medium=github&utm_campaign=retiform-labs%2Fpaperless-mcp&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 An MCP (Model Context Protocol) server for interacting with a Paperless-NGX API server. This server provides tools for managing documents, tags, correspondents, and document types in your Paperless-NGX instance.
 
 ## About this fork
 
-This repository is a fork of [baruchiro/paperless-mcp](https://github.com/baruchiro/paperless-mcp) (ISC license, © Baruch Odem) maintained by Retiform Labs. It adds bounded content reads — ranged `get_document_content` windows, a `search_passages` tool, an inline budget, and `content_length` metadata — so MCP agents can locate and extract document text without flooding their context. The fork point is tagged `upstream-v2.2.1`. Changes are also offered upstream via pull request.
+This is a fork of [baruchiro/paperless-mcp](https://github.com/baruchiro/paperless-mcp)
+(ISC license, (c) Baruch Odem), maintained by **Retiform Labs** and published as
+**`@retiform/paperless-mcp`**. Fork point: tag `upstream-v2.2.1`.
+
+Upstream returns whole documents. That is fine for a human clicking through a UI
+and crippling for an agent: a single `get_document_content` call on a
+several-hundred-page PDF can consume an entire context window, and there is no
+way to ask for a slice. This fork adds bounded reads:
+
+- **Ranged `get_document_content`** -- `offset` + `max_chars` windows, with honest
+  `content_length` / `truncated` / `has_more` metadata.
+- **`search_passages`** -- full-text hits returned as bounded passages around the
+  actual match, with score and offset, so an agent can locate and then page into
+  the exact region it needs.
+- **An inline budget** -- `PAPERLESS_MCP_MAX_INLINE_CHARS` makes an oversized
+  request fail loudly instead of silently flooding the caller.
+- **`content_length`** on list/query/get results, so a client can size a read
+  before making it.
+- **Query resilience** -- an apostrophe in a search query is retried sanitized
+  instead of returning a hard 400.
+
+We also fix the build so it is idempotent (`tsc` no longer consumes its own
+`.d.ts` output on a rebuild). The bounded-read work is offered upstream by pull
+request; it is published here in the meantime because agentic clients need it now.
 
 ## Quick Start
 
-[![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](https://cursor.com/install-mcp?name=paperless&config=eyJjb21tYW5kIjoibnB4IC15IEBiYXJ1Y2hpcm8vcGFwZXJsZXNzLW1jcEBsYXRlc3QiLCJlbnYiOnsiUEFQRVJMRVNTX1VSTCI6Imh0dHA6Ly95b3VyLXBhcGVybGVzcy1pbnN0YW5jZTo4MDAwIiwiUEFQRVJMRVNTX0FQSV9LRVkiOiJ5b3VyLWFwaS10b2tlbiJ9fQ%3D%3D)
+[![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](https://cursor.com/install-mcp?name=paperless&config=eyJjb21tYW5kIjoibnB4IC15IEByZXRpZm9ybS9wYXBlcmxlc3MtbWNwQGxhdGVzdCIsImVudiI6eyJQQVBFUkxFU1NfVVJMIjoiaHR0cDovL3lvdXItcGFwZXJsZXNzLWluc3RhbmNlOjgwMDAiLCJQQVBFUkxFU1NfQVBJX0tFWSI6InlvdXItYXBpLXRva2VuIn19)
 
 ### Installation
 
@@ -24,7 +47,7 @@ Add these to your MCP config file:
   "command": "npx",
   "args": [
     "-y",
-    "@baruchiro/paperless-mcp@latest",
+    "@retiform/paperless-mcp@latest",
   ],
   "env": {
     "PAPERLESS_URL": "http://your-paperless-instance:8000",
@@ -42,7 +65,7 @@ Add these to your MCP config file:
     "run",
     "-i",
     "--rm",
-    "ghcr.io/baruchiro/paperless-mcp:latest",
+    "ghcr.io/retiform-labs/paperless-mcp:latest",
   ],
   "env": {
     "PAPERLESS_URL": "http://your-paperless-instance:8000",
@@ -900,7 +923,7 @@ Create a `docker-compose.yml` file:
 services:
   paperless-mcp:
     container_name: paperless-mcp
-    image: ghcr.io/baruchiro/paperless-mcp:latest
+    image: ghcr.io/retiform-labs/paperless-mcp:latest
     environment:
       - PAPERLESS_URL=http://your-paperless-ngx-server:8000
       - PAPERLESS_API_KEY=your-paperless-api-key

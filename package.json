@@ -1,7 +1,7 @@
 {
-  "name": "@baruchiro/paperless-mcp",
-  "version": "2.3.0",
-  "description": "Model Context Protocol (MCP) server for interacting with Paperless-NGX document management system. Enables AI assistants to manage documents, tags, correspondents, and document types through the Paperless-NGX API.",
+  "name": "@retiform/paperless-mcp",
+  "version": "2.3.1",
+  "description": "MCP server for Paperless-NGX with bounded content reads - ranged document windows and passage search so agents never flood their context.",
   "main": "build/index.js",
   "bin": {
     "paperless-mcp": "build/index.js"
@@ -13,7 +13,7 @@
     "build": "tsc",
     "dxt-pack": "dxt pack",
     "inspect": "npm run build && npx -y @modelcontextprotocol/inspector node build/index.js",
-    "prepack": "npm run build && npm run dxt-pack"
+    "prepack": "rm -rf build && npm run build && npm run dxt-pack"
   },
   "keywords": [
     "mcp",
@@ -24,16 +24,16 @@
     "model-context-protocol",
     "paperless"
   ],
-  "author": "Baruch Odem",
+  "author": "Guan <guan@retiform.dev>",
   "license": "ISC",
   "engines": {
     "node": ">=24.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/baruchiro/paperless-mcp.git"
+    "url": "git+https://github.com/retiform-labs/paperless-mcp.git"
   },
-  "homepage": "https://github.com/baruchiro/paperless-mcp",
+  "homepage": "https://github.com/retiform-labs/paperless-mcp",
   "files": [
     "build",
     "README.md",
@@ -41,7 +41,7 @@
     "paperless-mcp.dxt"
   ],
   "bugs": {
-    "url": "https://github.com/baruchiro/paperless-mcp/issues"
+    "url": "https://github.com/retiform-labs/paperless-mcp/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

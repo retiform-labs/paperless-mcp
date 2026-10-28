@@ -1,6 +1,6 @@
 {
   "name": "@retiform/paperless-mcp",
-  "version": "2.3.1",
+  "version": "2.3.2",
   "description": "MCP server for Paperless-NGX with bounded content reads - ranged document windows and passage search so agents never flood their context.",
   "main": "build/index.js",
   "bin": {

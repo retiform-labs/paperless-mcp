@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "@retiform/paperless-mcp",
   "display_name": "Paperless-ngx",
-  "version": "2.3.1",
+  "version": "2.3.2",
   "description": "Model Context Protocol (MCP) server for interacting with Paperless-NGX document management system. Enables AI assistants to manage documents, tags, correspondents, and document types through the Paperless-NGX API.",
   "author": {
     "name": "Guan",

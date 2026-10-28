@@ -7,6 +7,15 @@
 > Entries at 2.2.1 and below are upstream's history, preserved verbatim.
 > 2.3.0 is ours: merged here, never published at the upstream scope.
 
+## 2.3.2
+
+### Patch Changes
+
+- Correct the fork section: it claimed the bounded-read work was offered
+  upstream by pull request. No such pull request exists. The shipped README in
+  2.3.1 therefore asserted work that had not been done. Documentation only;
+  no code changes.
+
 ## 2.3.1
 
 ### Patch Changes

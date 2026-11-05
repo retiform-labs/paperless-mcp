@@ -7,6 +7,16 @@
 > Entries at 2.2.1 and below are upstream's history, preserved verbatim.
 > 2.3.0 is ours: merged here, never published at the upstream scope.
 
+## 2.3.4
+
+### Patch Changes
+
+- Correct the README Development section, which described a build system this
+  package does not use: it pointed contributors at  (a file that does
+  not exist) and named  as the framework. The package is built with
+   from  on , and the entry point is
+  . Documentation only - no code or behaviour change.
+
 ## 2.3.3
 
 ### Patch Changes

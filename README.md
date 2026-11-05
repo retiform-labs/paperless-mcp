@@ -848,14 +848,17 @@ Want to contribute or modify the server? Here's what you need to know:
 npm install
 ```
 
-3. Make your changes to server.js
-4. Test locally:
+3. Make your changes in `src/`
+4. Build and test locally:
 ```bash
-node server.js http://localhost:8000 your-test-token
+npm run build
+node build/index.js http://localhost:8000 your-test-token
 ```
 
+Run the test suite with `npm test`.
+
 The server is built with:
-- [litemcp](https://github.com/wong2/litemcp): A TypeScript framework for building MCP servers
+- [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk): the official TypeScript SDK for MCP servers
 - [zod](https://github.com/colinhacks/zod): TypeScript-first schema validation
 
 ## API Documentation

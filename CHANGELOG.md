@@ -7,6 +7,20 @@
 > Entries at 2.2.1 and below are upstream's history, preserved verbatim.
 > 2.3.0 is ours: merged here, never published at the upstream scope.
 
+## 2.3.3
+
+### Patch Changes
+
+- Decode numeric and hexadecimal character references in search_passages
+  highlight anchors. Django returns the hex form of an apostrophe; the decoder
+  handled only the decimal form and apos, so the longest anchor phrase failed to
+  match the stored text and fell through to a short head-of-document phrase.
+  The reported offset then pointed at a region containing none of the hit.
+
+  Measured on document 5: the phrase sits at offset 60313, the tool reported
+  9410. A regression test built from the live shape fails on the old decoder
+  and passes on the new one.
+
 ## 2.3.2
 
 ### Patch Changes

@@ -335,6 +335,36 @@ describe("buildSearchPassage highlight anchoring (live failure shapes)", () => {
     assert.ok(passage.passage.includes("fish and chips"), `offset ${passage.offset}`);
   });
 
+  test("decodes numeric character references so the longest anchor is not skipped", () => {
+    // Live shape 3 (2026-11-05, doc 5 of the Kongokai series): the server
+    // returns &#x27; for an apostrophe in its highlight HTML. The decoder
+    // handled &#39; and &apos; but not the numeric/hex forms, so the LONGEST
+    // candidate phrase carried a literal entity that never occurs in the
+    // stored text. indexOf returned -1 and the search fell through to a SHORT
+    // phrase that also occurs near the document head, so the reported offset
+    // pointed at a region containing none of the hit.
+    const early = "[SPEAKER_01] This is unrelated chatter near the head. ";
+    const filler = "z".repeat(1500);
+    const hit =
+      "This is pre-living, pre-living, pre-manifesting, pre-living the goal. [SPEAKER_01] I" +
+      String.fromCharCode(39) +
+      "m getting familiar with it.";
+    const doc = createDocument({ content: early + filler + hit });
+    const passage = buildSearchPassage(doc, ["pre", "manifesting"], 600, {
+      score: 9.71,
+      highlights:
+        "This is <b>pre</b>-living, <b>pre</b>-living, <b>pre</b>-<b>manifesting</b>, <b>pre</b>-living the goal. [SPEAKER_01] I&#x27;m getting familiar with it.",
+    });
+    assert.ok(
+      passage.passage.includes("pre-manifesting"),
+      "window anchored at " + passage.offset + " missed the hit"
+    );
+    assert.ok(
+      passage.offset >= early.length,
+      "should anchor on the decoded long phrase, not a short phrase near the head"
+    );
+  });
+
   test("skips very short highlight matches that cannot anchor", () => {
     const doc = createDocument({ content: `head a b here ${"w".repeat(800)} a rare anchoring phrase tail` });
     const passage = buildSearchPassage(doc, ["a", "rare"], 300, {

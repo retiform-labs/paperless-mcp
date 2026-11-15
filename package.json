@@ -14,7 +14,8 @@
     "dxt-pack": "dxt pack",
     "inspect": "npm run build && npx -y @modelcontextprotocol/inspector node build/index.js",
     "prepack": "rm -rf build && npm run build && npm run sync-manifest && npm run dxt-pack",
-    "sync-manifest": "node scripts/sync-manifest-version.mjs"
+    "sync-manifest": "node scripts/sync-manifest-version.mjs",
+    "eval": "node eval/run.mjs"
   },
   "keywords": [
     "mcp",

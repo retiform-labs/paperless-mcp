@@ -96,6 +96,15 @@ export interface SyncReport {
   failed: number;
   /** True when the delete step was skipped because the list changed mid-run. */
   deletedSkipped: boolean;
+  /**
+   * Text splits performed because the embedding server refused an input as
+   * over-long, summed over the run.
+   *
+   * Reported because the alternative is silence: a run that split 400 chunks
+   * and one that split none produce identical counts, and the number is the
+   * only evidence the fallback is load-bearing rather than merely present.
+   */
+  splits: number;
 }
 
 interface NameMaps {
@@ -146,6 +155,48 @@ function toNameMap(rows: { id: number; name: string }[]): Map<number, string> {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * A failure that knows which document produced it.
+ *
+ * Attached to the error rather than wrapping it, because the class identity is
+ * what the caller above checks: `EmbeddingUnavailableError` must still be
+ * recognised after the context is added, or the abort-on-outage path would stop
+ * aborting. A wrapper would have to copy the prototype to keep that true, and
+ * a context object on the error does it without touching the type.
+ */
+interface DocumentContext {
+  documentId: number;
+  documentTitle: string;
+}
+
+function withDocumentContext<T>(err: T, context: DocumentContext): T {
+  if (err && typeof err === "object") {
+    Object.assign(err as object, context);
+  }
+  return err;
+}
+
+/**
+ * Name the document in one line, so a failure is diagnosable from the log
+ * without a second round trip.
+ *
+ * Id first, because the id is what a person pastes into the Paperless URL; the
+ * title second, because it is what makes the line recognisable at a glance. A
+ * title is a document HEADING, never body text, so it is safe to log.
+ */
+function describeDocument(err: unknown, fallbackId: number): string {
+  const id =
+    err && typeof err === "object" && "documentId" in err
+      ? (err as DocumentContext).documentId
+      : fallbackId;
+  const title =
+    err && typeof err === "object" && "documentTitle" in err
+      ? (err as DocumentContext).documentTitle
+      : undefined;
+  if (!title) return `${id} (title unavailable: the document could not be read)`;
+  return `${id} \u201c${title}\u201d`;
 }
 
 function log(line: string): void {
@@ -245,7 +296,8 @@ export class IndexSync {
       log(
         `run finished in ${seconds}s: +${report.added} added, ` +
           `~${report.updated} updated, -${report.deleted} deleted, ` +
-          `${report.metadataRefreshed} metadata refreshed, ${report.failed} failed` +
+          `${report.metadataRefreshed} metadata refreshed, ${report.failed} failed, ` +
+          `${report.splits} split` +
           (report.deletedSkipped ? " (deletes SKIPPED: list changed mid-run)" : "")
       );
       return report;
@@ -263,6 +315,7 @@ export class IndexSync {
       metadataRefreshed: 0,
       failed: 0,
       deletedSkipped: false,
+      splits: 0,
     };
 
     // ⚠️ THE INDEX'S IDENTITY IS WRITTEN BY THE RUN, NOT BY THE FIXTURE.
@@ -329,17 +382,32 @@ export class IndexSync {
     for (const [id] of toSync) {
       try {
         names ??= await this.loadNames();
-        await this.syncDocument(id, names);
+        const context = await this.syncDocument(id, names);
         reindexed.add(id);
+        report.splits += context.splits;
         if (indexed.has(id)) report.updated++;
         else report.added++;
       } catch (err) {
         if (err instanceof EmbeddingUnavailableError) {
-          log("the embedding server is unavailable, stopping the run");
+          // ⚠️ ABORT vs CONTINUE, AND THE LOG SAYS WHICH.
+          //
+          // An embedding outage (or a text that cannot be made small enough to
+          // embed) is not a per-document problem: every remaining document
+          // would fail the same way, so the run stops and the index keeps what
+          // it has. The line names the document so the next investigation
+          // starts from an id instead of from a scan of 2,466 candidates.
+          log(
+            `document ${describeDocument(err, id)} failed and the run is ` +
+              `ABORTING (this failure would repeat for every remaining ` +
+              `document): ${errorMessage(err)}`
+          );
           throw err;
         }
         report.failed++;
-        log(`document ${id} failed: ${errorMessage(err)}`);
+        log(
+          `document ${describeDocument(err, id)} failed; CONTINUING with the ` +
+            `next document: ${errorMessage(err)}`
+        );
       }
     }
 
@@ -354,15 +422,21 @@ export class IndexSync {
       if (metadataAt && new Date(metadataAt).getTime() >= refreshBefore) continue;
       try {
         names ??= await this.loadNames();
-        await this.refreshMetadata(id, names);
+        report.splits += await this.refreshMetadata(id, names);
         report.metadataRefreshed++;
       } catch (err) {
         if (err instanceof EmbeddingUnavailableError) {
-          log("the embedding server is unavailable, stopping the run");
+          log(
+            `document ${describeDocument(err, id)} metadata failed and the ` +
+              `run is ABORTING: ${errorMessage(err)}`
+          );
           throw err;
         }
         report.failed++;
-        log(`document ${id} metadata failed: ${errorMessage(err)}`);
+        log(
+          `document ${describeDocument(err, id)} metadata failed; CONTINUING ` +
+            `with the next document: ${errorMessage(err)}`
+        );
       }
     }
 
@@ -445,12 +519,39 @@ export class IndexSync {
     );
   }
 
-  private async syncDocument(id: number, names: NameMaps): Promise<void> {
-    const doc = await this.get<DocumentDetail>(`/documents/${id}/`);
+  private async syncDocument(
+    id: number,
+    names: NameMaps
+  ): Promise<{ splits: number }> {
+    // A detail fetch can fail on its own, before any embedding happens. The id
+    // is still the useful part of the identity, so it is attached here and the
+    // title is left absent rather than invented.
+    let doc: DocumentDetail;
+    try {
+      doc = await this.get<DocumentDetail>(`/documents/${id}/`);
+    } catch (err) {
+      throw withDocumentContext(err, { documentId: id, documentTitle: "" });
+    }
     const metaText = this.metadataTextFor(doc, names);
     const { chunks, truncated } = chunkText(doc.content ?? "", this.maxChunks);
     const texts = [metaText, ...chunks];
-    const embeddings = await this.embedder.embedDocuments(texts);
+
+    // ⚠️ THE TITLE IS ATTACHED HERE BECAUSE THIS IS THE ONLY FRAME THAT HAS IT.
+    //
+    // A bare "document 1944 failed" costs a second round trip to identify, and
+    // on a 2,466-document corpus walking candidates by hand is how twenty tool
+    // calls get spent on one diagnosis. The title is a document heading rather
+    // than body text, so naming it in a log line places no content at risk.
+    let embeddings: number[][];
+    try {
+      embeddings = await this.embedder.embedDocuments(texts);
+    } catch (err) {
+      throw withDocumentContext(err, {
+        documentId: id,
+        documentTitle: doc.title,
+      });
+    }
+    const splits = this.embedder.lastSplits?.length ?? 0;
 
     const storedChunks: StoredChunk[] = embeddings.map((embedding, i) => ({
       kind: i === 0 ? "metadata" : "content",
@@ -473,16 +574,31 @@ export class IndexSync {
       },
       storedChunks
     );
+    return { splits };
   }
 
-  private async refreshMetadata(id: number, names: NameMaps): Promise<void> {
-    const doc = await this.get<DocumentDetail>(`/documents/${id}/`);
+  private async refreshMetadata(id: number, names: NameMaps): Promise<number> {
+    let doc: DocumentDetail;
+    try {
+      doc = await this.get<DocumentDetail>(`/documents/${id}/`);
+    } catch (err) {
+      throw withDocumentContext(err, { documentId: id, documentTitle: "" });
+    }
     const metaText = this.metadataTextFor(doc, names);
-    const [embedding] = await this.embedder.embedDocuments([metaText]);
+    let embedding: number[];
+    try {
+      [embedding] = await this.embedder.embedDocuments([metaText]);
+    } catch (err) {
+      throw withDocumentContext(err, {
+        documentId: id,
+        documentTitle: doc.title,
+      });
+    }
     this.store.replaceMetadata(
       id,
       { kind: "metadata", text: metaText, embedding },
       new Date(this.now()).toISOString()
     );
+    return this.embedder.lastSplits?.length ?? 0;
   }
 }

@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import {
+  EmbeddingContextLengthError,
   EmbeddingUnavailableError,
+  MIN_SPLITTABLE_CHARS,
   OllamaEmbedder,
   PREFIXES,
   PrefixModeMismatchError,
   embeddingsFromBody,
+  graphemeBoundaries,
+  isContextLengthRejection,
   parseEmbeddingEndpoint,
+  renormalisedMean,
   resolveEmbeddingEndpoint,
+  splitForEmbedding,
   assertPrefixModeMatches,
 } from "./embedder";
 
@@ -866,5 +872,372 @@ describe("transport options", () => {
       await embedder.embedQuery("q");
       assert.equal(captured[0].init.redirect, "error", url);
     }
+  });
+});
+
+// ── Over-long inputs: split and retry ──────────────────────────────────────
+// The run this exists for died at document 1,727 of 2,466 with a 400 whose body
+// read "the input length exceeds the context length". It is a TOKEN budget
+// being reported against a CHARACTER limit: a chunk of 2,000 characters of dot
+// leaders tokenises past a 2,048-token window while 2,000 characters of prose
+// uses about a quarter of it. `truncate: true` was measured and does not help.
+//
+// So the fix cannot be a smaller character budget -- that would re-chunk the
+// whole corpus and still fail on the next document with a denser one. It has to
+// be a reaction to the REJECTION. Every test below therefore fails against a
+// client that treats this 400 like any other.
+
+/** A server that refuses any single input longer than `limit` characters. */
+function tokenWindowServer(limit: number) {
+  return (request: CapturedRequest) => {
+    const overLong = request.body.input.some((text) => text.length > limit);
+    if (overLong) {
+      return {
+        status: 400,
+        body: { error: "the input length exceeds the context length" },
+      };
+    }
+    // Length-keyed axis, so a test can tell WHICH text produced a vector and
+    // therefore prove the order survived the split.
+    return {
+      body: {
+        embeddings: request.body.input.map((text) => {
+          const vector = new Array<number>(768).fill(0);
+          vector[text.length % 768] = 1;
+          return vector;
+        }),
+      },
+    };
+  };
+}
+
+function unitNorm(vector: number[]): number {
+  return Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+}
+
+describe("a context-length rejection is split, not treated as an outage", () => {
+  test("the whole batch survives and stays in order when one text is too long", async () => {
+    // Without the split this rejects: the first request contains the over-long
+    // text, the client raises EmbeddingUnavailableError, and every remaining
+    // text in the batch is lost. That is precisely how 739 documents were
+    // skipped by a failure that was about 1,727 of them.
+    const limit = 300;
+    const captured = stubFetch(tokenWindowServer(limit));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "none",
+      batchSize: 16,
+    });
+    const short = Array.from({ length: 15 }, (_, index) =>
+      String.fromCharCode(97 + index).repeat(40 + index)
+    );
+    const overLong = "d".repeat(900);
+    const result = await embedder.embedDocuments([...short, overLong]);
+
+    assert.equal(result.length, 16, "every text must get a vector");
+    // The short texts were never split, so each keeps its length-keyed axis and
+    // its position. A split that reordered the batch would put a different axis
+    // at these indices.
+    for (let index = 0; index < short.length; index += 1) {
+      const axis = short[index].length % 768;
+      assert.equal(result[index][axis], 1, `text ${index} lost its vector`);
+    }
+    assert.ok(
+      captured.length > 1,
+      "the client must have retried in halves rather than giving up"
+    );
+  });
+
+  test("both halves of a split text contribute to the one vector", async () => {
+    // ⚠️ THIS TEST EXISTS BECAUSE A WEAKER ONE PASSED A DELIBERATE DEFECT.
+    //
+    // An earlier version asserted only `result.length === 1` and `norm === 1`.
+    // Mutating the code to embed the left half and SILENTLY DROP the right half
+    // left both assertions green -- one vector, unit length, plausible-looking.
+    // That is precisely the "silently drop content" failure the whole design is
+    // trying to make impossible, so the test has to see BOTH halves.
+    //
+    // The marker server returns a vector whose components say WHICH markers the
+    // text contained. A correct mean has both; a dropped tail has only the one.
+    const captured: CapturedRequest[] = [];
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      captured.push({
+        url: String(url),
+        body,
+        headers: {},
+        init: init ?? {},
+      });
+      if (body.input.some((text: string) => text.length > 300)) {
+        return new Response(
+          JSON.stringify({ error: "the input length exceeds the context length" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          embeddings: body.input.map((text: string) => {
+            const vector = new Array<number>(768).fill(0);
+            if (text.includes("ALPHA")) vector[0] = 1;
+            if (text.includes("OMEGA")) vector[1] = 1;
+            return vector;
+          }),
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }) as typeof fetch;
+
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "none",
+    });
+    // The two markers land on opposite sides of every split point, so a correct
+    // combination is the only thing that can produce both components.
+    const text = "ALPHA ".repeat(100) + "OMEGA ".repeat(100);
+    const result = await embedder.embedDocuments([text]);
+
+    assert.equal(result.length, 1, "one chunk stays one row");
+    assert.equal(result[0].length, 768);
+    assert.ok(
+      Math.abs(unitNorm(result[0]) - 1) < 1e-9,
+      "a cosine store compares direction, so the combined vector must be unit length"
+    );
+    assert.ok(
+      result[0][0] > 0,
+      "the ALPHA half contributed nothing -- the head was dropped"
+    );
+    assert.ok(
+      result[0][1] > 0,
+      "the OMEGA half contributed nothing -- the tail was silently dropped"
+    );
+    assert.ok(captured.some((request) => (request.body.input as string[]).some(
+      (text: string) => text.includes("OMEGA")
+    )), "the tail half must actually have been sent");
+  });
+
+  test("an unrelated 400 is still an outage and is NOT retried", async () => {
+    // Splitting on every 400 would turn one visible failure into a cascade of
+    // invisible ones, and would hammer a server that is rejecting us for a
+    // reason a smaller request cannot fix.
+    const captured = stubFetch(() => ({
+      status: 400,
+      body: { error: "model 'nomic-embed-text' not found, try pulling it first" },
+    }));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "none",
+    });
+    await assert.rejects(
+      () => embedder.embedDocuments(["a", "b", "c", "d"]),
+      (err: unknown) =>
+        err instanceof EmbeddingUnavailableError &&
+        !(err instanceof EmbeddingContextLengthError)
+    );
+    assert.equal(captured.length, 1, "no retry, no split, one request");
+  });
+
+  test("a 5xx is an outage and is NOT retried", async () => {
+    const captured = stubFetch(() => ({ status: 503, body: {} }));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "none",
+    });
+    await assert.rejects(
+      () => embedder.embedDocuments(["a", "b"]),
+      EmbeddingUnavailableError
+    );
+    assert.equal(captured.length, 1);
+  });
+
+  test("a fragment at the floor fails the document whole instead of dropping it", async () => {
+    // ⚠️ THE HONEST-FAILURE TEST. A shorter-than-floor fragment means the
+    // model window is smaller than this index was built against, and splitting
+    // again produces non-words. The alternative -- quietly skipping the chunk
+    // -- leaves an index that reports a document it holds only part of, and no
+    // count anywhere would show it.
+    const captured: CapturedRequest[] = [];
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      captured.push({
+        url: String(url),
+        body: JSON.parse(String(init?.body ?? "{}")),
+        headers: {},
+        init: init ?? {},
+      });
+      return new Response(
+        JSON.stringify({ error: "the input length exceeds the context length" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }) as typeof fetch;
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "none",
+    });
+    // ⚠️ THE ASSERTION NAMES THE FLOOR, NOT JUST THE FAILURE. A weaker version
+    // asserted only that SOME EmbeddingUnavailableError mentioning "no content
+    // was dropped" was raised -- and a mutation that DELETED the floor check
+    // still passed, because recursion ran down to a one-character fragment and
+    // threw the different "no boundary to split at" error, which reads the same
+    // from the outside. Deleting a safety check must not be invisible.
+    await assert.rejects(
+      () => embedder.embedDocuments(["x".repeat(MIN_SPLITTABLE_CHARS * 4)]),
+      (err: unknown) =>
+        err instanceof EmbeddingUnavailableError &&
+        new RegExp(
+          `splitting down to the ${MIN_SPLITTABLE_CHARS}-character floor`
+        ).test((err as Error).message) &&
+        /No content was dropped/.test((err as Error).message)
+    );
+    // Bounded: it split down to the floor and then stopped. An unbounded
+    // recursion would keep issuing requests forever.
+    assert.ok(captured.length < 32, `recursion must terminate (${captured.length})`);
+  });
+
+  test("the split path preserves the document prefix on both halves", async () => {
+    // The prefix is a MEANING carrier for nomic ("search_document: "). Applying
+    // it once at the top and then splitting would send bare fragments, whose
+    // vectors live in a different region of the space than the queries.
+    const captured = stubFetch(tokenWindowServer(300));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "nomic",
+    });
+    await embedder.embedDocuments(["word ".repeat(400)]);
+    assert.ok(captured.length >= 3);
+    for (const request of captured) {
+      for (const text of request.body.input) {
+        assert.ok(
+          text.startsWith(PREFIXES.nomic.document),
+          "every dispatched fragment must carry the document prefix"
+        );
+      }
+    }
+  });
+
+  test("splits are reported as counts and lengths, never as text", async () => {
+    // The sync logs this, so it is a surface document content could reach. It
+    // carries a length and a reason; there is no field a text could hide in.
+    stubFetch(tokenWindowServer(300));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "none",
+    });
+    await embedder.embedDocuments(["word ".repeat(400)]);
+    const splits = embedder.lastSplits;
+    assert.ok(splits.length > 0, "the fallback fired, so it must be visible");
+    for (const event of splits) {
+      assert.deepEqual(
+        Object.keys(event).sort(),
+        ["chars", "depth", "reason", "texts"],
+        "a split event must expose only counts and lengths"
+      );
+      assert.ok(["batch", "text"].includes(event.reason));
+    }
+  });
+
+  test("a query is never split, so a too-long query still fails loudly", async () => {
+    // A query is the user's own words. Silently embedding the mean of two
+    // halves of their sentence would answer a question they did not ask.
+    stubFetch(() => ({
+      status: 400,
+      body: { error: "the input length exceeds the context length" },
+    }));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "none",
+    });
+    await assert.rejects(() => embedder.embedQuery("x".repeat(9000)), EmbeddingUnavailableError);
+  });
+});
+
+describe("split boundaries never cut a grapheme", () => {
+  test("graphemeBoundaries counts a stacked Tibetan syllable as one unit", () => {
+    // U+0F40 (TIBETAN LETTER KA, category Lo) + U+0F74 (vowel sign U, category
+    // Mn) is one syllable in two code points. This is why a naive slice is not
+    // merely inelegant on this corpus -- it produces a base with a stranded
+    // vowel sign, which is not a word, embedded as if it were.
+    const syllable = "\u0F40\u0F74";
+    assert.deepEqual(graphemeBoundaries(syllable), [0, 2]);
+  });
+
+  test("graphemeBoundaries does not split a run of two syllables", () => {
+    // The two-base fixture is the one that matters: a segmenter that glued an
+    // unbounded run of combining marks would report one cluster for any length,
+    // and the splitter below would then have no boundary to use at all.
+    const text = "\u0F40\u0F74".repeat(2);
+    assert.deepEqual(graphemeBoundaries(text), [0, 2, 4]);
+  });
+
+  test("a whitespace-free Tibetan run splits between syllables, not inside one", () => {
+    // One ASCII character of padding makes the midpoint FALL INSIDE a cluster:
+    // boundaries are 0,1,3,5..., so a naive slice at 200 lands between a base
+    // and its vowel sign. Every grapheme boundary here is odd above 1.
+    const text = "a" + "\u0F40\u0F74".repeat(200);
+    assert.equal(text.length % 2, 1, "the fixture must have an odd length");
+    const midpoint = Math.floor(text.length / 2);
+    assert.ok(
+      graphemeBoundaries(text).includes(midpoint) === false,
+      "the midpoint must NOT be a grapheme boundary, or the test proves nothing"
+    );
+    const halves = splitForEmbedding(text);
+    assert.ok(halves, "a 401-character text must be splittable");
+    for (const half of halves) {
+      assert.ok(
+        !/^\p{M}/u.test(half),
+        "a fragment must never begin with a combining mark"
+      );
+    }
+    assert.equal(halves[0].length + halves[1].length, text.length);
+  });
+
+  test("an unbreakable run still reports undefined rather than looping", () => {
+    // One character, no boundary of any kind. The caller throws; it does not
+    // recurse forever on a text it cannot shorten.
+    assert.equal(splitForEmbedding("x"), undefined);
+  });
+});
+
+describe("helpers the split path is built from", () => {
+  test("isContextLengthRejection keys on the server text, and only on a 400", () => {
+    const body = "the input length exceeds the context length";
+    assert.equal(isContextLengthRejection(400, body), true);
+    assert.equal(isContextLengthRejection(400, body.toUpperCase()), true);
+    assert.equal(isContextLengthRejection(500, body), false);
+    assert.equal(isContextLengthRejection(401, body), false);
+    assert.equal(isContextLengthRejection(400, "something else entirely"), false);
+  });
+
+  test("renormalisedMean returns direction at unit length", () => {
+    const a = new Array<number>(768).fill(0);
+    a[0] = 1;
+    const b = new Array<number>(768).fill(0);
+    b[1] = 1;
+    const mean = renormalisedMean(a, b);
+    assert.ok(Math.abs(unitNorm(mean) - 1) < 1e-12);
+    assert.ok(Math.abs(mean[0] - mean[1]) < 1e-12, "both halves weigh the same");
+  });
+
+  test("renormalisedMean refuses opposed halves rather than storing a dead row", () => {
+    // A zero vector has no direction: it would sit in the index matching
+    // nothing, indistinguishable from a chunk with no content.
+    const a = new Array<number>(768).fill(0);
+    a[0] = 1;
+    const b = new Array<number>(768).fill(0);
+    b[0] = -1;
+    assert.throws(() => renormalisedMean(a, b), EmbeddingUnavailableError);
+  });
+
+  test("renormalisedMean refuses mismatched widths", () => {
+    assert.throws(
+      () => renormalisedMean([1, 0], [1, 0, 0]),
+      /different widths/
+    );
   });
 });

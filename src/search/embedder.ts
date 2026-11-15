@@ -69,12 +69,69 @@ export class PrefixModeMismatchError extends Error {
   }
 }
 
+/**
+ * Raised when the server rejects a request because the INPUT IS TOO LONG for
+ * the model's context window.
+ *
+ * It extends `EmbeddingUnavailableError` deliberately. A caller that has no
+ * specific handling -- a query, or a fragment that is already at the floor --
+ * must abort rather than write an index that silently omits a document. The
+ * subclass only lets the document path recognise the case and split.
+ *
+ * ⚠️ THIS IS A TOKEN BUDGET, NOT A CHARACTER BUDGET, AND THE TWO DIVERGE
+ * WILDLY. Measured on this corpus: a run of ellipsis (dot leaders in a table of
+ * contents) tokenises at roughly 1.5-2 tokens per character, so 2,000
+ * characters blows a 2,048-token window, while 2,000 characters of prose uses
+ * about 500 and passes with room to spare. `truncate: true` was measured and
+ * does NOT fix it. The only fix that works for any chunk is to make the request
+ * smaller, which is what the split path does.
+ */
+export class EmbeddingContextLengthError extends EmbeddingUnavailableError {
+  /** Length in characters of the longest input that was refused. */
+  readonly longestChars: number;
+
+  constructor(message: string, longestChars: number) {
+    super(message);
+    this.name = "EmbeddingContextLengthError";
+    this.longestChars = longestChars;
+  }
+}
+
+/**
+ * Is this reply the server saying "your input is too long"?
+ *
+ * Detected on the SERVER'S OWN TEXT, and only on a 400. Anything else -- a 500,
+ * a 401, a 400 whose body says something different -- stays a plain
+ * `EmbeddingUnavailableError`, because splitting a request in response to an
+ * unrelated 400 would turn one visible failure into a hundred invisible ones.
+ */
+export function isContextLengthRejection(
+  status: number,
+  serverText: string
+): boolean {
+  if (status !== 400) return false;
+  return /input length exceeds the context length/i.test(serverText);
+}
+
 export interface Embedder {
   readonly model: string;
   readonly prefixMode: PrefixMode;
   readonly dimensions: number;
   embedDocuments(texts: string[]): Promise<number[][]>;
   embedQuery(query: string): Promise<number[]>;
+  /**
+   * Split events observed during the most recent `embedDocuments` call.
+   *
+   * Declared on the INTERFACE, not only on the implementation, so the sync can
+   * report that the fallback fired without knowing which embedder it holds. A
+   * fake that omits it is fine -- the field is optional and the sync reads it
+   * defensively -- which keeps every existing test double valid.
+   *
+   * Counts and lengths only. A caller may log this, so it must never be able to
+   * log document text through it.
+   */
+  readonly lastSplits?: readonly ContextSplitEvent[];
+
   /**
    * Cheap liveness check that must NOT be assumed equivalent to "constructed".
    *
@@ -295,6 +352,155 @@ export function embeddingsFromBody(body: unknown): number[][] | undefined {
   return undefined;
 }
 
+/**
+ * Below this many characters a refused fragment is NOT split further.
+ *
+ * A fragment this short is refused only if the model window is far smaller than
+ * the one this index was built against, and splitting again would produce
+ * non-words while looping. Throwing names the fragment length; silently
+ * dropping it would leave an index that claims a document it does not hold.
+ */
+export const MIN_SPLITTABLE_CHARS = 200;
+
+/**
+ * Hard ceiling on recursion, so a pathological input cannot spin.
+ *
+ * Halving a 16-text batch down to singles costs 4 levels; halving a 2,000
+ * character chunk down to the floor costs 4 more. Twelve is generous and still
+ * finite, which is the property that matters.
+ */
+export const MAX_SPLIT_DEPTH = 12;
+
+/** One split event. Counts and lengths only -- never document text. */
+export interface ContextSplitEvent {
+  /** `batch` split an over-long request into halves; `text` split one text. */
+  readonly reason: "batch" | "text";
+  /** Texts in the request that was refused. */
+  readonly texts: number;
+  /** Characters in the refused text; 0 for a batch split. */
+  readonly chars: number;
+  readonly depth: number;
+}
+
+interface GraphemeSegment {
+  readonly segment: string;
+}
+interface GraphemeSegmenter {
+  segment(input: string): Iterable<GraphemeSegment>;
+}
+type GraphemeSegmenterCtor = new (
+  locale?: string,
+  options?: { granularity: "grapheme" }
+) => GraphemeSegmenter;
+
+/**
+ * Every grapheme-cluster boundary in `text`, as character offsets.
+ *
+ * ⚠️ THIS IS LOAD-BEARING FOR THIS CORPUS, NOT A REFINEMENT. It is
+ * Tibetan-heavy, and a Tibetan syllable stacks combining marks (category Mn) on
+ * a base consonant: U+0FB3 U+0F74 is one syllable, two code points, and a slice
+ * between them produces a base plus a stranded vowel sign -- text that is not a
+ * word, embedded as if it were. `Intl.Segmenter` is present in every Node this
+ * package supports (measured on v24.21.0), so the Array.from fallback is
+ * belt-and-braces: it keeps surrogate pairs intact, which is the one thing a
+ * naive slice gets catastrophically wrong, and leaves combining marks to the
+ * segmenter that is actually available.
+ */
+export function graphemeBoundaries(text: string): number[] {
+  const Ctor = (Intl as unknown as { Segmenter?: GraphemeSegmenterCtor })
+    .Segmenter;
+  const bounds: number[] = [0];
+  if (!Ctor) {
+    let offset = 0;
+    for (const codePoint of Array.from(text)) {
+      offset += codePoint.length;
+      bounds.push(offset);
+    }
+    return bounds;
+  }
+  const segmenter = new Ctor("en", { granularity: "grapheme" });
+  let offset = 0;
+  for (const part of segmenter.segment(text)) {
+    offset += part.segment.length;
+    bounds.push(offset);
+  }
+  return bounds;
+}
+
+/**
+ * Cut a text in two so each half can be embedded on its own.
+ *
+ * A whitespace boundary nearest the midpoint is preferred, because a split
+ * between words produces two fragments that still mean something. When the text
+ * has no whitespace at all -- a run of dot leaders is exactly that -- the
+ * nearest GRAPHEME boundary is used instead. That fallback is what keeps the
+ * "never mid-codepoint" rule true for input that offers no word break.
+ *
+ * Returns undefined when no split makes progress, so the caller throws rather
+ * than looping on a text it cannot shorten.
+ */
+export function splitForEmbedding(text: string): [string, string] | undefined {
+  const target = Math.floor(text.length / 2);
+
+  for (let delta = 0; delta <= text.length; delta += 1) {
+    for (const index of delta === 0 ? [target] : [target - delta, target + delta]) {
+      if (index <= 0 || index >= text.length) continue;
+      if (!/\s/.test(text[index])) continue;
+      const left = text.slice(0, index).trim();
+      const right = text.slice(index).trim();
+      if (left.length > 0 && right.length > 0) return [left, right];
+    }
+  }
+
+  const bounds = graphemeBoundaries(text);
+  let best: [string, string] | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const index of bounds) {
+    if (index <= 0 || index >= text.length) continue;
+    const left = text.slice(0, index);
+    const right = text.slice(index);
+    if (left.trim().length === 0 || right.trim().length === 0) continue;
+    const distance = Math.abs(index - target);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = [left, right];
+    }
+  }
+  return best;
+}
+
+/**
+ * The direction of the mean of two vectors, re-normalised to unit length.
+ *
+ * A cosine-indexed store compares DIRECTION, so the mean of two halves of one
+ * chunk carries the whole of what the store can use while keeping one vector
+ * per chunk -- and therefore one row, and an unchanged `chunkCount` contract.
+ * The mean is not unit length even when both inputs are, so it is re-normalised.
+ *
+ * Two nearly opposed halves would average to a vector with no direction. That
+ * is reported rather than stored: a zero vector matches nothing and would sit
+ * in the index as a chunk that can never be retrieved.
+ */
+export function renormalisedMean(a: number[], b: number[]): number[] {
+  if (a.length !== b.length) {
+    throw new EmbeddingUnavailableError(
+      `Cannot combine vectors of different widths (${a.length} and ${b.length}).`
+    );
+  }
+  const mean = a.map((value, index) => (value + b[index]) / 2);
+  let sumOfSquares = 0;
+  for (const value of mean) sumOfSquares += value * value;
+  const norm = Math.sqrt(sumOfSquares);
+  if (!Number.isFinite(norm) || norm === 0) {
+    throw new EmbeddingUnavailableError(
+      "The two halves of an over-long chunk averaged to a vector with no " +
+        "direction, so it could not be stored. This means the halves carry " +
+        "opposed content; the chunk needs splitting at a different point."
+    );
+  }
+  return mean.map((value) => value / norm);
+}
+
 export interface EmbeddingClientOptions {
   /** Base URL, or a full endpoint URL. See `resolveEmbeddingEndpoint`. */
   url: string;
@@ -368,14 +574,152 @@ export class OllamaEmbedder implements Embedder {
     this.batchSize = batchSize;
   }
 
+  /**
+   * Split events observed during the most recent `embedDocuments` call.
+   *
+   * Counts and lengths only: a caller may log this, so it must never be able to
+   * log document text through it. The sync reads it to report how many chunks
+   * needed the fallback, which is the only way to know the split path is
+   * actually doing work rather than merely existing.
+   */
+  get lastSplits(): readonly ContextSplitEvent[] {
+    return this.splits;
+  }
+
+  private splits: ContextSplitEvent[] = [];
+
   async embedDocuments(texts: string[]): Promise<number[][]> {
+    this.splits = [];
     const prefix = PREFIXES[this.prefixMode].document;
     const embeddings: number[][] = [];
     for (let i = 0; i < texts.length; i += this.batchSize) {
-      const batch = texts.slice(i, i + this.batchSize).map((text) => prefix + text);
-      embeddings.push(...(await this.request(batch, DOCUMENT_TIMEOUT_MS)));
+      // ⚠️ THE BATCH CARRIES UNPREFIXED TEXT, AND THE PREFIX IS ADDED AT THE
+      // LEAF. Prefixing here and splitting later looks equivalent and is not:
+      // a split cuts the string, so only the half that kept the head would
+      // carry the prefix -- and for nomic the prefix is a MEANING carrier, not
+      // decoration. Bare fragments embed into a different region of the space
+      // than the queries do, and nothing about the result would look wrong.
+      const batch = texts.slice(i, i + this.batchSize);
+      embeddings.push(...(await this.embedBatch(batch, prefix, 0)));
     }
     return embeddings;
+  }
+
+  /**
+   * Embed a batch, halving it on a context-length rejection.
+   *
+   * The order of the returned vectors is the order of `batch`, which is what
+   * makes this a drop-in replacement for the single `request` call it replaces:
+   * the caller zips vectors to texts by index and never learns a split happened.
+   *
+   * A batch of ONE that is still refused moves to `embedOne`, which splits the
+   * TEXT. The two levels exist because they fail differently: a multi-text
+   * batch can succeed simply by being asked as two requests, while a single
+   * over-long text has to be shortened or it will never embed.
+   */
+  private async embedBatch(
+    batch: string[],
+    prefix: string,
+    depth: number
+  ): Promise<number[][]> {
+    if (batch.length === 0) return [];
+    if (depth > MAX_SPLIT_DEPTH) {
+      throw new EmbeddingUnavailableError(
+        `The embedding server rejected this input at split depth ${MAX_SPLIT_DEPTH}. ` +
+          `Refusing to recurse further rather than loop.`
+      );
+    }
+    try {
+      return await this.request(
+        batch.map((text) => prefix + text),
+        DOCUMENT_TIMEOUT_MS
+      );
+    } catch (err) {
+      if (!(err instanceof EmbeddingContextLengthError)) throw err;
+      if (batch.length > 1) {
+        // Halve by TEXT COUNT. Each half keeps its relative order, so the
+        // concatenation of the two answers is the answer for the whole batch.
+        const middle = Math.floor(batch.length / 2);
+        this.splits.push({
+          reason: "batch",
+          texts: batch.length,
+          chars: 0,
+          depth,
+        });
+        const left = await this.embedBatch(batch.slice(0, middle), prefix, depth + 1);
+        const right = await this.embedBatch(batch.slice(middle), prefix, depth + 1);
+        return [...left, ...right];
+      }
+      return [await this.embedOne(batch[0], prefix, depth)];
+    }
+  }
+
+  /**
+   * Embed a single text, splitting it when the server says it is too long.
+   *
+   * The halves are embedded independently and combined into ONE vector, so the
+   * chunk stays one row and the sync's `chunkCount` contract -- one vector per
+   * chunk -- is untouched. Anything else would change how many rows a document
+   * has, and the store rejects a count that disagrees with the array.
+   */
+  private async embedOne(
+    text: string,
+    prefix: string,
+    depth: number
+  ): Promise<number[]> {
+    try {
+      const [embedding] = await this.request(
+        [prefix + text],
+        DOCUMENT_TIMEOUT_MS
+      );
+      return embedding;
+    } catch (err) {
+      if (!(err instanceof EmbeddingContextLengthError)) throw err;
+
+      // ⚠️ THE FLOOR. Below this, splitting produces non-words and the only
+      // honest move is to fail loudly with the fragment's length. Silently
+      // dropping the chunk would leave an index claiming a document it holds
+      // only part of -- the exact failure the abort-on-outage rule exists to
+      // prevent, arriving through a different door.
+      if (text.length < MIN_SPLITTABLE_CHARS) {
+        throw new EmbeddingUnavailableError(
+          `An input of ${text.length} characters was rejected as too long even ` +
+            `after splitting down to the ${MIN_SPLITTABLE_CHARS}-character ` +
+            `floor. The embedding model's context window is smaller than this ` +
+            `index was built against. No content was dropped: the document ` +
+            `fails whole.`
+        );
+      }
+      if (depth > MAX_SPLIT_DEPTH) {
+        throw new EmbeddingUnavailableError(
+          `An input of ${text.length} characters was still rejected at split ` +
+            `depth ${MAX_SPLIT_DEPTH}. Refusing to recurse further rather ` +
+            `than loop.`
+        );
+      }
+
+      const halves = splitForEmbedding(text);
+      if (!halves) {
+        throw new EmbeddingUnavailableError(
+          `An input of ${text.length} characters was rejected as too long, and ` +
+            `it has no boundary to split at. No content was dropped: the ` +
+            `document fails whole.`
+        );
+      }
+
+      this.splits.push({
+        reason: "text",
+        texts: 1,
+        chars: text.length,
+        depth,
+      });
+
+      // The halves are bare text; each gets the prefix on its own request, so
+      // both fragments are embedded the same way a whole chunk would be.
+      const left = await this.embedOne(halves[0], prefix, depth + 1);
+      const right = await this.embedOne(halves[1], prefix, depth + 1);
+      return renormalisedMean(left, right);
+    }
   }
 
   async embedQuery(query: string): Promise<number[]> {
@@ -463,12 +807,31 @@ export class OllamaEmbedder implements Embedder {
       // line, and always the server's words rather than ours. A provider that
       // echoes embeddings input in its errors is worth knowing about anyway.
       let detail = "";
+      let serverText = "";
       try {
-        const text = (await response.text()).replace(/\s+/g, " ").trim();
-        if (text) detail = `: ${text.slice(0, 300)}`;
+        serverText = (await response.text()).replace(/\s+/g, " ").trim();
+        if (serverText) detail = `: ${serverText.slice(0, 300)}`;
       } catch {
         // Reading the error body is a diagnostic courtesy; its failure must not
         // replace the status error with a read error.
+      }
+      // ⭐ ONE 400 IS NOT LIKE THE OTHERS. A context-length rejection is about
+      // the SIZE of this request, not about the server, so the caller can make
+      // the request smaller and succeed. Every other status -- including a 400
+      // that says something else -- stays an outage, because retrying a real
+      // rejection in halves turns one visible failure into many invisible ones.
+      //
+      // The longest input is measured HERE rather than passed in: this is the
+      // only frame that knows the exact batch that was refused, and a length
+      // carried down from the caller would be a second source of truth about
+      // the same request.
+      if (isContextLengthRejection(response.status, serverText)) {
+        const longest = input.reduce((max, text) => Math.max(max, text.length), 0);
+        throw new EmbeddingContextLengthError(
+          `The embedding server rejected an over-long input with status ` +
+            `${response.status} at ${this.endpointUrl}${detail}`,
+          longest
+        );
       }
       throw new EmbeddingUnavailableError(
         `The embedding server answered with status ${response.status} at ${this.endpointUrl}${detail}`

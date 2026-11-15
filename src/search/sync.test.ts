@@ -46,6 +46,21 @@ class StubEmbedder implements Embedder {
   readonly dimensions = EMBEDDING_DIMENSIONS;
   calls = 0;
   failWith: Error | undefined;
+  /**
+   * Set to make the stub report split events, the way a real embedder does when
+   * it had to shorten an input. The sync must surface this in its report --
+   * a run that split 400 chunks and one that split none otherwise produce
+   * identical counts, and the number is the only evidence the fallback ran.
+   */
+  splitCount = 0;
+  get lastSplits() {
+    return Array.from({ length: this.splitCount }, () => ({
+      reason: "text" as const,
+      texts: 1,
+      chars: 2000,
+      depth: 0,
+    }));
+  }
 
   async embedDocuments(texts: string[]): Promise<number[][]> {
     this.calls += 1;
@@ -557,6 +572,158 @@ describe("IndexSync — chunk truncation", () => {
     try {
       await makeSync({ api, index, embedder: new StubEmbedder() }).run();
       assert.equal(index.truncatedCount(), 0);
+    } finally {
+      index.close();
+    }
+  });
+});
+
+describe("IndexSync — a failure names its document, and says whether the run stops", () => {
+  /** Capture what the sync logs, without letting it reach the test output. */
+  function captureLog(): { lines: string[]; restore: () => void } {
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      lines.push(args.map((arg) => String(arg)).join(" "));
+    };
+    return {
+      lines,
+      restore: () => {
+        console.error = original;
+      },
+    };
+  }
+
+  test("an aborted run names the document by id AND title", async () => {
+    // ⚠️ THE WHOLE POINT OF THIS TEST. The run this fixes failed with a bare
+    // "the embedding server is unavailable, stopping the run" and no document
+    // identity at all -- identifying the culprit took a separate investigation
+    // and a hand-built probe. An id here would have been one call.
+    const api = new FakeApi();
+    api.add({ id: 1944, title: "HkMp5ArmorersManual" });
+    api.add({ id: 1945 });
+    const embedder = new StubEmbedder();
+    embedder.failWith = new EmbeddingUnavailableError(
+      "status 400: the input length exceeds the context length"
+    );
+    const index = openIndex();
+    const { lines, restore } = captureLog();
+    try {
+      await assert.rejects(() => makeSync({ api, index, embedder }).run());
+    } finally {
+      restore();
+      index.close();
+    }
+    const failureLine = lines.find((line) => line.includes("ABORTING"));
+    assert.ok(failureLine, `no ABORTING line was logged (${lines.join(" | ")})`);
+    assert.match(failureLine!, /1944/);
+    assert.match(failureLine!, /HkMp5ArmorersManual/);
+    // The decision is stated, not implied: a reader must not have to infer from
+    // silence whether the next document was attempted.
+    assert.doesNotMatch(failureLine!, /CONTINUING/);
+  });
+
+  test("a per-document failure names the document and says the run continues", async () => {
+    // The inverse case. These two lines are the whole diagnosis surface: with
+    // both in place, "why did document N disappear" is answerable from the log.
+    //
+    // ⚠️ THE FAILURE HERE IS IN THE DETAIL FETCH, WHICH IS THE HARD CASE: the
+    // title has not been read yet, so the honest line carries the id and says
+    // the title is unavailable. Substituting a placeholder name would look
+    // tidier and would be a fabrication in a diagnostic line.
+    const api = new FakeApi();
+    api.add({ id: 7, title: "Exploding Document" });
+    api.add({ id: 8 });
+    api.failDocumentIds.add(7);
+    const index = openIndex();
+    const { lines, restore } = captureLog();
+    let report: SyncReport;
+    try {
+      report = await makeSync({ api, index, embedder: new StubEmbedder() }).run();
+    } finally {
+      restore();
+      index.close();
+    }
+    assert.equal(report.failed, 1);
+    const failureLine = lines.find((line) => line.includes("CONTINUING"));
+    assert.ok(failureLine, `no CONTINUING line was logged (${lines.join(" | ")})`);
+    assert.match(failureLine!, /7 /);
+    assert.match(failureLine!, /title unavailable/);
+  });
+
+  test("a per-document EMBEDDING failure names the title, because it was read", async () => {
+    // The other half of the same surface. Here the detail fetch succeeded, so
+    // the title exists and must appear -- that is the whole saving: no second
+    // round trip to find out which of 2,466 documents this was.
+    const api = new FakeApi();
+    api.add({ id: 11, title: "Tibetan Grammar Scan" });
+    api.add({ id: 12 });
+    const embedder = new StubEmbedder();
+    let call = 0;
+    const realEmbed = embedder.embedDocuments.bind(embedder);
+    embedder.embedDocuments = async (texts: string[]) => {
+      call += 1;
+      if (call === 1) throw new Error("vector store rejected the batch");
+      return realEmbed(texts);
+    };
+    const index = openIndex();
+    const { lines, restore } = captureLog();
+    let report: SyncReport;
+    try {
+      report = await makeSync({ api, index, embedder }).run();
+    } finally {
+      restore();
+      index.close();
+    }
+    assert.equal(report.failed, 1);
+    assert.equal(report.added, 1, "the run continued to the second document");
+    const failureLine = lines.find((line) => line.includes("CONTINUING"));
+    assert.ok(failureLine, `no CONTINUING line was logged (${lines.join(" | ")})`);
+    assert.match(failureLine!, /11 /);
+    assert.match(failureLine!, /Tibetan Grammar Scan/);
+  });
+
+  test("the report counts splits, so the fallback is visible and not merely present", async () => {
+    // Silence is the failure mode being designed against: without this counter
+    // a corpus that needed 400 splits looks exactly like one that needed none,
+    // and there is no way to confirm the new path is load-bearing.
+    const api = new FakeApi();
+    api.add({ id: 1 });
+    api.add({ id: 2 });
+    const embedder = new StubEmbedder();
+    embedder.splitCount = 3;
+    const index = openIndex();
+    try {
+      const report = await makeSync({ api, index, embedder }).run();
+      assert.equal(report.splits, 6, "3 per document, two documents");
+      assert.equal(report.added, 2);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("an embedder with no split counter is not a failure", async () => {
+    // `lastSplits` is optional on the interface so that every existing test
+    // double stays valid. A required field would have made this a breaking
+    // change for fakes that have nothing to report.
+    const api = new FakeApi();
+    api.add({ id: 1 });
+    const plain: Embedder = {
+      model: "plain",
+      prefixMode: "none",
+      dimensions: EMBEDDING_DIMENSIONS,
+      async embedDocuments(texts: string[]) {
+        return texts.map((_, i) => axisVector((i + 1) % 64));
+      },
+      async embedQuery() {
+        return axisVector(1);
+      },
+    };
+    const index = openIndex();
+    try {
+      const report = await makeSync({ api, index, embedder: plain }).run();
+      assert.equal(report.splits, 0);
+      assert.equal(report.added, 1);
     } finally {
       index.close();
     }

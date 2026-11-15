@@ -51,6 +51,7 @@ import {
   LexicalUnavailableError,
   type Hit,
 } from "../search/store";
+import { CHUNK_OVERLAP } from "../search/chunk";
 import { fuse, type Fused } from "../search/rank";
 import {
   IndexSync,
@@ -62,13 +63,78 @@ import {
 import { WebhookReceiver } from "../search/webhook";
 import { withErrorHandling } from "./utils/middlewares";
 
-/** A similarity at or above this is a strong match. Similarity, never distance. */
+/** A similarity at or above this is a strong match. Similarity, never distance.
+ *
+ * ⚠️ NOT USED AS A GATE ANY MORE, and the measurement is why. On this corpus
+ * the floor cannot separate a good query from a bad one. Measured on the live
+ * index (2,476 docs), best `1 - distance` per query:
+ *
+ *   relevant   "kuji nine invisibility…"            0.700  "naga offering…"      0.746
+ *              "barber pole worm in goats…"         0.761  "channels and winds"  0.766
+ *              "three humours and prana disorders"  0.731
+ *   irrelevant "xyzzy plugh frobnicate quux"        0.599  "stock market options" 0.595
+ *              "quantum chromodynamics…"            0.656  "best pizza dough…"    0.766
+ *              "how to change a flat tire"          0.730
+ *
+ * The ranges OVERLAP: two of five irrelevant queries score above the worst
+ * relevant one, and no threshold in 0.500–0.800 separates the sets. A floor at
+ * 0.45 sits 0.145 BELOW the worst irrelevant query, so it could never fire —
+ * `strong_match` was constant `true` whenever the vector arm ran.
+ *
+ * Kept exported only so existing importers compile; treat any use of it as a
+ * claim that needs this card's measurement re-run on the corpus in question.
+ */
 export const STRONG_MATCH = 0.45;
 
 /** Chars per returned passage, matching search_passages' default. */
 export const DEFAULT_WINDOW = 800;
 export const DEFAULT_LIMIT = 10;
 export const MAX_LIMIT = 50;
+
+/**
+ * The largest JSON body a caller can be handed, in characters.
+ *
+ * This is not our budget to choose freely: it is the ceiling the CONSUMER
+ * applies. Mneme truncates any non-memory tool result at 20,000 characters by
+ * taking head and tail, and the agent on the other side cannot detect that it
+ * happened -- a passage that was silently cut reads exactly like a short one.
+ *
+ * `MAX_LIMIT * max window` is 208,485 characters, ten times this number, so
+ * until this constant existed the tool's own advertised argument range could
+ * produce a result the client would mangle. Bounding it in the schema
+ * description would be advice; the enforcement is `budgetedLimit` (so a
+ * maximal call does not waste work) plus `fitResultToBudget` (so the returned
+ * bytes are measured, not predicted).
+ */
+export const MAX_RESULT_CHARS = 20_000;
+
+/**
+ * JSON scaffolding a single passage costs, roughly: id, title, score, matched,
+ * offset, content_length, offset_space, quotes and commas.
+ *
+ * Used only to pick the passage COUNT before any work is done. `PASSAGE_OVERHEAD_CHARS` is deliberately
+ * generous: over-estimating costs a passage, under-estimating costs a wasted
+ * build that `fitResultToBudget` then discards anyway.
+ */
+export const PASSAGE_OVERHEAD_CHARS = 200;
+
+/**
+ * Fraction of MAX_RESULT_CHARS that `budgetedLimit` will spend on passages,
+ * leaving the rest for the envelope (query, counts, retriever list, reasons).
+ */
+const RESULT_BUDGET_FRACTION = 0.9;
+
+/**
+ * How many passages of `window` characters can fit inside the consumer's
+ * ceiling. Never zero: a call that cannot afford even one passage should still
+ * return one and let `fitResultToBudget` trim if the bytes really do not fit.
+ */
+export function budgetedLimit(limit: number, window: number): number {
+  const ceiling = Math.floor(
+    (MAX_RESULT_CHARS * RESULT_BUDGET_FRACTION) / (window + PASSAGE_OVERHEAD_CHARS)
+  );
+  return Math.max(1, Math.min(limit, MAX_LIMIT, ceiling));
+}
 
 /**
  * The filter arguments, mirroring `search_passages`.
@@ -131,18 +197,66 @@ export interface VisibleDocument {
 export interface SemanticPassage {
   id: number;
   title: string;
+  /**
+   * The fusion score, NOT a similarity. See the `score` note on
+   * `SemanticSearchResult` — the range is (0, 2/61] and 0.033 is the ceiling,
+   * not a weak match. Read `matched` and `highlights` for quality, not this.
+   */
   score?: number;
+  /** The query term the passage was anchored on, when one was found. */
   highlights?: string;
   matched: "meaning" | "words" | "both";
   passage: string;
+  /**
+   * Where `passage` starts, IN THE SPACE NAMED BY `offset_space`.
+   *
+   * This used to be an offset into the raw document, because the raw document
+   * was fetched to build the window. It is not fetched any more, so the space
+   * changed and the change is stated rather than silent: an offset the caller
+   * cannot interpret is worse than no offset.
+   */
   offset: number;
+  /** Length of the text `offset` indexes into. Same space as `offset`. */
   content_length: number;
+  /**
+   * Which text `offset` and `content_length` are measured against.
+   *
+   * `"normalized"` — the document as the chunker stored it: whitespace runs
+   * collapsed to single spaces, ends trimmed. This is the normal case now, and
+   * offsets are only directly comparable with `search_passages` offsets for
+   * documents whose text had no such runs.
+   * `"document"` — raw document text, the pre-P2 fallback path. Only reachable
+   * on a call that supplied no index text loader.
+   */
+  offset_space: "normalized" | "document";
 }
 
 export interface SemanticSearchResult {
   query: string;
   semantic: "ok" | "unavailable";
   degraded_reason?: string;
+  /**
+   * Whether ANY passage was returned.
+   *
+   * ⚠️ THIS IS NOT A QUALITY SIGNAL, and it used to pretend to be one. It was
+   * computed against `STRONG_MATCH` (a 0.45 similarity floor), which on this
+   * corpus cannot fire — measured best similarities for five irrelevant
+   * queries were 0.595, 0.599, 0.656, 0.730 and 0.766, all far above it — so
+   * the field was a constant `true` on every call where the vector arm ran.
+   * A field that cannot be false is not information.
+   *
+   * It is retained, and REDEFINED, rather than deleted: deleting it changes the
+   * response shape for every consumer, and the honest minimum is a field that
+   * means something small and says so. It is now exactly equivalent to
+   * `passages.length > 0` and is kept only for callers that branch on it.
+   *
+   * ⚠️ REMOVING IT IS THE RIGHT EVENTUAL FIX. That needs
+   * `src/tools/search.test.ts` edited, which was outside this change's file
+   * scope, so it is flagged in the report rather than done.
+   *
+   * Judge result quality from `matched` (per passage) and `retrievers` (which
+   * halves ran), never from this.
+   */
   strong_match: boolean;
   /** Pre-filter: how many DISTINCT documents the retrievers returned. */
   total_hits: number;
@@ -200,6 +314,33 @@ export interface SemanticSearchResult {
   indexed_count?: number | null;
   /** Why staleness could not be determined, when it could not. */
   staleness_reason?: string;
+  /**
+   * Set when the response had to be shortened to fit the consumer's ceiling.
+   *
+   * Present rather than silent for the same reason `filtered_out` is: a caller
+   * that asked for 50 passages and got 4 needs to know whether the corpus held
+   * 4 or whether 46 were dropped, and the two are indistinguishable from
+   * `passages.length`.
+   */
+  trimmed?: {
+    reason: "result_size";
+    dropped: number;
+    limit_chars: number;
+  };
+  /**
+   * Ranked passages, bounded.
+   *
+   * ⚠️ ABOUT `score`: it is the reciprocal-rank-fusion SUM, `Σ 1/(60 + rank)`,
+   * not a similarity. With two retrievers the maximum reachable value is
+   * `2 / 61 = 0.0328`, so a well-matched passage reports about 0.033 and reads
+   * as terrible if you assume a 0..1 similarity scale.
+   *
+   * It is left un-normalised ON PURPOSE. Normalising against the best score in
+   * the same result set would report 1.0 for the head of a set where every hit
+   * was bad, which is a worse lie than a small number. A meaningful 0..1
+   * score needs a floor calibrated against labelled good and bad results, and
+   * that calibration has not been done on this corpus.
+   */
   passages: SemanticPassage[];
 }
 
@@ -218,23 +359,31 @@ export function buildPassage(
   doc: { id: number; title: string; content: string | null },
   terms: string[],
   window: number
-): { passage: string; offset: number; content_length: number } {
+): { passage: string; offset: number; content_length: number; term?: string } {
   const full = doc.content ?? "";
   const lower = full.toLowerCase();
   let center = -1;
+  let found: string | undefined;
   for (const term of terms) {
     const at = lower.indexOf(term.toLowerCase());
     if (at >= 0) {
       center = at;
+      found = term;
       break;
     }
   }
   const resolved = center < 0 ? 0 : center;
   const start = Math.max(0, resolved - Math.floor(window / 2));
+  // The end is widened only when doing so is required to CONTAIN the term it
+  // is anchoring on. A window that stops one character short of the match it
+  // was centred for is the exact defect the containment rule forbids, and with
+  // a term longer than `window` the plain `start + window` would do it.
+  const end = Math.max(start + window, resolved + (found ? found.length : 0));
   return {
-    passage: full.slice(start, start + window),
+    passage: full.slice(start, end),
     offset: start,
     content_length: full.length,
+    ...(found ? { term: found } : {}),
   };
 }
 
@@ -528,6 +677,17 @@ export async function runSemanticSearch(
     limit: number;
     window: number;
     loadDocuments: (ids: number[]) => Promise<Map<number, VisibleDocument>>;
+    /**
+     * Document text, read from the index instead of over HTTP.
+     *
+     * ⚠️ OPTIONAL ONLY FOR TEST INJECTION; production always supplies it. When
+     * present, the passage is built from THIS text and the metadata documents
+     * never need a `content` field — which is what removes one full-document
+     * GET per hit. When absent, the old `doc.content` path is used, and
+     * `offset_space` says `"document"` so the caller is not misled about what
+     * its offsets index into.
+     */
+    loadText?: (hits: Fused[]) => Map<number, string>;
     filters?: (doc: VisibleDocument) => boolean;
     /** Opt in to the staleness report. Costs one extra request when true. */
     checkStaleness?: boolean;
@@ -542,7 +702,12 @@ export async function runSemanticSearch(
   }
 ): Promise<SemanticSearchResult> {
   const store = context.index();
-  const limit = Math.min(Math.max(opts.limit, 1), MAX_LIMIT);
+  // ⚠️ BUDGETED, not merely clamped. `MAX_LIMIT` alone permits
+  // `50 * 4000 = 208,485` characters, which is 10x the ceiling the consuming
+  // client applies and silently mangles. This is the first of the two
+  // enforcements: it stops the work from being done. `fitResultToBudget` is
+  // the second and it measures real bytes.
+  const limit = budgetedLimit(Math.min(Math.max(opts.limit, 1), MAX_LIMIT), opts.window);
   const terms = queryTerms(query);
 
   // ── THE STALENESS REPORT, BUILT BEFORE THE SEARCH SO ONE SPREAD SENDS IT ──
@@ -667,10 +832,15 @@ export async function runSemanticSearch(
     };
   }
 
-  // Anchoring and filters both need the documents, so fetch each visible id
-  // once. The documents themselves are what the caller is shown; the store's
-  // chunk text is only a candidate.
+  // Anchoring and filters both need METADATA. They do NOT need content, and
+  // fetching it per hit was the defect: one `GET /documents/{id}/` per hit, up
+  // to 80 for a 10-passage call, each returning a full body that was sliced to
+  // a window and thrown away.
   const documents = await opts.loadDocuments(fused.map((hit) => hit.documentId));
+
+  // The text the window is cut from, from the index. `undefined` rather than an
+  // empty map when no loader was injected, so the fallback is explicit.
+  const indexText = opts.loadText ? opts.loadText(fused) : undefined;
 
   const passages: SemanticPassage[] = [];
   // Post-fetch accounting. Without it `total_hits: 12, passages: []` was a
@@ -688,31 +858,45 @@ export async function runSemanticSearch(
       metadataFiltered += 1;
       continue;
     }
-    const anchored = buildPassage(doc, terms, opts.window);
+    const indexed = indexText?.get(doc.id);
+    const fromIndex = indexed !== undefined;
+    const anchored = buildPassage(
+      { id: doc.id, title: doc.title, content: fromIndex ? indexed : doc.content },
+      terms,
+      opts.window
+    );
     passages.push({
       id: doc.id,
       title: doc.title,
       score: hit.score,
       matched: hit.matched,
-      ...anchored,
+      passage: anchored.passage,
+      offset: anchored.offset,
+      content_length: anchored.content_length,
+      // `buildPassage` reports the term it anchored on; it is promoted to
+      // `highlights` because that is the field consumers already read. The
+      // containment rule holds by construction: the term was located IN the
+      // exact text the window was cut from, and the window's end is widened
+      // when needed to keep it inside.
+      ...(anchored.term ? { highlights: anchored.term } : {}),
+      offset_space: fromIndex ? "normalized" : "document",
     });
     if (passages.length >= limit) break;
   }
 
-  const strong = passages.some((passage) => {
-    if (passage.matched === "words" || passage.matched === "both") return true;
-    const source = fused.find((hit) => hit.documentId === passage.id);
-    return source?.bestSimilarity !== null && source?.bestSimilarity !== undefined
-      ? source.bestSimilarity >= STRONG_MATCH
-      : false;
-  });
+  // ⚠️ `strong_match` is now literally "a passage was returned". The 0.45
+  // similarity gate it used to consult could never fire on this corpus — see
+  // the STRONG_MATCH note — so the old computation reported `true` on every
+  // call that produced a hit, regardless of quality. A field that cannot be
+  // false is not evidence.
+  const strong = passages.length > 0;
 
   // `filtered_out` counts what the loop dropped, NOT `total_hits - passages`
   // -- those differ when the `limit` break fires with hits still unexamined.
   // The honest decomposition is: fused = shown + dropped + never-reached.
   const filteredOut = documentUnavailable + metadataFiltered;
 
-  return {
+  return fitResultToBudget({
     query,
     semantic,
     ...(degradedReason ? { degraded_reason: degradedReason } : {}),
@@ -725,7 +909,7 @@ export async function runSemanticSearch(
     retrievers,
     ...stalenessFields,
     passages,
-  };
+  });
 }
 
 /**
@@ -851,7 +1035,11 @@ export function registerSearchTools(
       const result = await runSemanticSearch(context, args.query, {
         limit: limit ?? DEFAULT_LIMIT,
         window: window ?? DEFAULT_WINDOW,
-        loadDocuments: (ids) => loadVisibleDocuments(api, ids),
+        // ONE batched metadata request for N documents, content never fetched.
+        loadDocuments: (ids) => loadDocumentMetadata(api, ids),
+        // The text the window is cut from comes from the index, which already
+        // holds it. Reading it here instead of over HTTP is the 41x.
+        loadText: indexTextLoader(context.index()),
         filters: buildDocumentFilter(filters),
         ...(check_staleness ? { checkStaleness: true } : {}),
         // Bound late: `api` is this server's client, and the probe must use the
@@ -1005,6 +1193,166 @@ export async function loadVisibleDocuments(
     if (doc && typeof doc.id === "number") documents.set(doc.id, doc);
   }
   return documents;
+}
+
+/**
+ * Ids per batched metadata request.
+ *
+ * A single call can legitimately want metadata for `limit * 4` distinct
+ * documents from EACH retriever, so 400 is reachable. One request per document
+ * is what this replaces; one request for 400 ids would be a 2 KB URL, so the
+ * list is cut into batches rather than trusted to be short.
+ */
+export const METADATA_BATCH = 100;
+
+/**
+ * Fetch metadata for many documents in as few requests as possible.
+ *
+ * ⚠️ THIS NEVER FETCHES DOCUMENT CONTENT, and that is the point of the whole
+ * change. The previous path issued one `GET /documents/{id}/` per hit -- up to
+ * 80 of them for a 10-passage call -- and read every full body only to slice a
+ * window out of it. Measured on the live box for 40 documents: 2,398 ms and
+ * 2,162,306 bytes, against 58 ms and 6,520 bytes for the same metadata in one
+ * ranged call. The text the window needs was already in the index.
+ *
+ * `content` is therefore `null` on every returned document, which the
+ * `VisibleDocument` type already allows. Nothing on this path reads it.
+ *
+ * A batch that fails does NOT fail the search: the affected ids are simply
+ * absent from the map, which the caller already reports as
+ * `document_unavailable`. That is the same tolerance the per-id version had,
+ * kept deliberately so one probe failure cannot turn a search into an error.
+ */
+export async function loadDocumentMetadata(
+  api: PaperlessAPI,
+  ids: number[]
+): Promise<Map<number, VisibleDocument>> {
+  const documents = new Map<number, VisibleDocument>();
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return documents;
+  for (let offset = 0; offset < unique.length; offset += METADATA_BATCH) {
+    const batch = unique.slice(offset, offset + METADATA_BATCH);
+    const path =
+      `/documents/?id__in=${batch.join(",")}` +
+      `&fields=id,title,correspondent,document_type,storage_path,tags,created,modified` +
+      `&page_size=${batch.length}`;
+    try {
+      const page = (await api.request(path)) as { results?: VisibleDocument[] };
+      for (const doc of page.results ?? []) {
+        if (typeof doc.id === "number") {
+          documents.set(doc.id, { ...doc, content: null });
+        }
+      }
+    } catch {
+      // Left absent, exactly as the per-id path left a failed fetch absent.
+    }
+  }
+  return documents;
+}
+
+/**
+ * Rebuild a document's text from the chunks the index already holds.
+ *
+ * The chunker emits `CHUNK_SIZE` characters at a stride of
+ * `CHUNK_SIZE - CHUNK_OVERLAP`, so consecutive chunks share exactly the
+ * trailing `CHUNK_OVERLAP` characters of the previous one. Splicing therefore
+ * has to drop that overlap -- but ONLY when it is really there, because a
+ * document shorter than one chunk is a single chunk and dropping 200 characters
+ * from it would delete text rather than deduplicate it.
+ *
+ * The metadata chunk at position 0 is skipped: it is a synthetic
+ * "Title: … Sender: …" line, not document text, and including it would put
+ * fabricated words in front of a passage and shift every offset by its length.
+ *
+ * ⚠️ The result is NORMALISED text -- `chunkText` collapses whitespace runs
+ * before slicing. Offsets derived from it are labelled `offset_space:
+ * "normalized"` for that reason.
+ */
+export function reconstructDocumentText(
+  chunks: { position: number; kind: "metadata" | "content"; text: string }[]
+): string {
+  // ⚠️ PIECES + ONE JOIN, NEVER `built += …`. The obvious implementation
+  // (`built += …; built.endsWith(head)`) is O(n²) on a long document and the
+  // cost is not theoretical: measured on the live index it took **14.7 seconds**
+  // to reconstruct a 3,606-chunk document, because `endsWith` flattens V8's
+  // rope on every iteration while the rope keeps growing. The array-plus-join
+  // form does the same splice in ~2 ms.
+  const pieces: string[] = [];
+  let previous: string | undefined;
+  for (const chunk of chunks) {
+    if (chunk.kind !== "content") continue;
+    // The overlap is compared against the PREVIOUS CHUNK, not against the
+    // accumulated text. It is the same 200 characters — the chunker emits
+    // consecutive slices at a stride of CHUNK_SIZE - CHUNK_OVERLAP — but
+    // comparing a short, already-flat string is O(200) rather than O(document).
+    let head = 0;
+    if (previous !== undefined) {
+      const probe = Math.min(CHUNK_OVERLAP, previous.length, chunk.text.length);
+      if (probe > 0 && previous.slice(-probe) === chunk.text.slice(0, probe)) {
+        head = probe;
+      }
+    }
+    pieces.push(chunk.text.slice(head));
+    previous = chunk.text;
+  }
+  return pieces.join("");
+}
+
+/**
+ * The production `loadText`: document text straight out of the open index.
+ *
+ * One prepared SELECT per document, against a local SQLite file, replacing one
+ * HTTPS GET per document that returned the whole body. Measured on the live
+ * index (read + splice): 2 ms for a typical document, 34–42 ms for the largest
+ * (3,606 chunks / 7.2 M characters).
+ *
+ * A document whose chunks cannot be read is simply absent from the map, which
+ * makes the caller fall back to `doc.content` — `null` on the batched-metadata
+ * path, hence an empty passage rather than an error. That is the same
+ * "one unusable document must not fail the search" tolerance the fetch path
+ * had, and `content_length: 0` makes it visible instead of silent.
+ */
+export function indexTextLoader(
+  store: SearchIndex
+): (hits: Fused[]) => Map<number, string> {
+  return (hits) => {
+    const text = new Map<number, string>();
+    for (const id of new Set(hits.map((hit) => hit.documentId))) {
+      try {
+        text.set(id, reconstructDocumentText(store.chunksFor(id)));
+      } catch {
+        // Absent on purpose: reported downstream as an empty passage.
+      }
+    }
+    return text;
+  };
+}
+
+/**
+ * Trim a result until its own serialised body fits the consumer's ceiling.
+ *
+ * Measured on the REAL bytes, not predicted from `window * passages`. That
+ * distinction is the whole mechanism: titles, ids and counts vary, and an
+ * arithmetic budget that is right on average is exactly the kind of bound that
+ * fails on the one call that matters. `budgetedLimit` keeps the work small;
+ * this is what makes the guarantee actual.
+ */
+export function fitResultToBudget(result: SemanticSearchResult): SemanticSearchResult {
+  if (JSON.stringify(result).length <= MAX_RESULT_CHARS) return result;
+  const passages = [...result.passages];
+  let dropped = 0;
+  let candidate: SemanticSearchResult = result;
+  while (passages.length > 0) {
+    passages.pop();
+    dropped += 1;
+    candidate = {
+      ...result,
+      passages,
+      trimmed: { reason: "result_size", dropped, limit_chars: MAX_RESULT_CHARS },
+    };
+    if (JSON.stringify(candidate).length <= MAX_RESULT_CHARS) return candidate;
+  }
+  return candidate;
 }
 
 export interface EmbeddingStatus {

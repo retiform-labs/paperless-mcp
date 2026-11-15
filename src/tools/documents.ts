@@ -244,7 +244,7 @@ export function extractHighlightPhrases(highlights: string): string[] {
 export function extractSearchTerms(query: string): string[] {
   const terms = query
     .toLowerCase()
-    .split(/[^\p{L}\p{N}_]+/u)
+    .split(/[^\p{L}\p{N}\p{M}_]+/u)
     .filter((term) => term.length > 0);
   return terms;
 }

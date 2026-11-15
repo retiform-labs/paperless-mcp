@@ -921,7 +921,7 @@ Semantic search is entirely optional and off until you configure it.
 
 The index lives at `~/.local/share/paperless-mcp/index/index.db` by default, or wherever `PAPERLESS_MCP_INDEX_DIR` points. It is deliberately **outside** your Paperless-ngx container: it is derived data, it is regenerable by re-running `sync_embeddings`, and putting it inside the container would drag it into that container's backup scope.
 
-**Local embedding only.** The endpoint must be a literal loopback or RFC 1918 address; a DNS name is refused, because a name can resolve to anywhere and indexed text must not leave the host. There is no API-key field and no remote-embedding code path — the constraint cannot be relaxed by configuration.
+**Keeping text on your own network.** If indexed content must not leave the host, set `PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY=true`. The endpoint is then required to be a literal loopback or RFC 1918 address, and a DNS name is refused — a name can resolve to anywhere. By default this restriction is off, because the package is published for general use and a third-party install must be able to point it at whichever provider it has.
 
 ## Keeping the index current without polling
 

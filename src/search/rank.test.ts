@@ -68,6 +68,19 @@ test("a document with several hits in one list counts only its best rank", () =>
   assert.equal(doc1.score, K60_RANK1);
 });
 
+test("best rank is used on the text side too, not just the vector side", () => {
+  // Doc 1 appears 3 times in the TEXT list at ranks 2, 3 and 4, and not at all
+  // in vector. Only its best rank (2) counts: 1/62. If the code took the last
+  // rank it would score 1/64 instead.
+  const text = [hit(9, 0, 1.0), hit(1, 1, 0.9), hit(1, 2, 0.8), hit(1, 3, 0.7)];
+
+  const result = fuse([], text);
+
+  const doc1 = result.find((r) => r.documentId === 1)!;
+  assert.equal(doc1.score, K60_RANK2);
+  assert.equal(doc1.matched, "words");
+});
+
 test("three documents: both beats meaning-only beats words-only", () => {
   // vector: [doc3, doc1]   text: [doc1, doc2]
   // doc1 -> 1/62 + 1/61  (both)

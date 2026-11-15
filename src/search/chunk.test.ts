@@ -115,6 +115,16 @@ test("one character past the cap boundary IS truncated", () => {
   assert.equal(result.truncated, true);
 });
 
+test("hitting the cap on text that also ENDS is not truncation", () => {
+  // The two conditions are independent and both must hold. With maxChunks=1 and
+  // a document short enough to fit in a single chunk, the cap is reached AND
+  // reachedEnd is true -- nothing was lost, so this is NOT truncated. Testing
+  // only `chunks.length >= maxChunks` would report truncation here wrongly.
+  const result = chunkText("a short document", 1);
+  assert.equal(result.chunks.length, 1);
+  assert.equal(result.truncated, false);
+});
+
 test("the cap is honoured and truncation is flagged with a small maxChunks", () => {
   const result = chunkText("y".repeat(5000 * 1800), 5);
   assert.equal(result.chunks.length, 5);

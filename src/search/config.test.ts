@@ -12,6 +12,7 @@ import {
   expandHome,
   indexPath,
   searchConfig,
+  webhookRefusal,
   CHUNK_ROWID_STRIDE,
   MAX_CHUNKS_LIMIT,
 } from "./config";
@@ -208,5 +209,90 @@ describe("expandHome", () => {
 
   test("does not expand a tilde that is not a path prefix", () => {
     assert.equal(expandHome("/tmp/~backup"), "/tmp/~backup");
+  });
+});
+
+describe("webhook configuration", () => {
+  test("a secret on its own enables NOTHING", () => {
+    // A secret is a modifier on the port, never an enabler of the feature. Set
+    // alone it must not turn on semantic search, and it must certainly not
+    // cause a socket: an install that upgrades has to acquire nothing it did
+    // not ask for.
+    assert.equal(searchConfig({ PAPERLESS_MCP_WEBHOOK_SECRET: "abc" }), undefined);
+    assert.equal(searchConfig({ PAPERLESS_MCP_WEBHOOK_HOST: "0.0.0.0" }), undefined);
+    assert.equal(searchConfig({ PAPERLESS_MCP_WEBHOOK_DEBOUNCE_MS: "500" }), undefined);
+  });
+
+  test("with no port configured the resolved value is zero, so nothing binds", () => {
+    // Any OTHER search variable enables the feature; the receiver must still be
+    // off, because the port is the only thing that opens a socket.
+    const config = searchConfig({ PAPERLESS_MCP_INDEX_DIR: "/tmp/idx" });
+    assert.ok(config);
+    assert.equal(config.webhookPort, 0);
+    assert.equal(webhookRefusal(config), undefined);
+  });
+
+  test("a port with no secret is REFUSED, and the reason names both variables", () => {
+    const config = searchConfig({ PAPERLESS_MCP_WEBHOOK_PORT: "8899" });
+    assert.ok(config);
+    assert.equal(config.webhookPort, 8899);
+    const refusal = webhookRefusal(config);
+    assert.ok(refusal, "a port without a secret must be refused");
+    assert.match(refusal, /PAPERLESS_MCP_WEBHOOK_SECRET/);
+    assert.match(refusal, /PAPERLESS_MCP_WEBHOOK_PORT/);
+  });
+
+  test("a port with a secret is accepted, and the default bind is loopback", () => {
+    const config = searchConfig({
+      PAPERLESS_MCP_WEBHOOK_PORT: "8899",
+      PAPERLESS_MCP_WEBHOOK_SECRET: "s3cret",
+    });
+    assert.ok(config);
+    assert.equal(webhookRefusal(config), undefined);
+    // Loopback by default: widening the bind has to be a decision, because an
+    // endpoint that writes to a local index should not be reachable off-host
+    // unless the operator said so.
+    assert.equal(config.webhookHost, "127.0.0.1");
+  });
+
+  test("the bind address and the debounce window are honoured when set", () => {
+    const config = searchConfig({
+      PAPERLESS_MCP_WEBHOOK_PORT: "8899",
+      PAPERLESS_MCP_WEBHOOK_SECRET: "s3cret",
+      PAPERLESS_MCP_WEBHOOK_HOST: "0.0.0.0",
+      PAPERLESS_MCP_WEBHOOK_DEBOUNCE_MS: "250",
+    });
+    assert.ok(config);
+    assert.equal(config.webhookHost, "0.0.0.0");
+    assert.equal(config.webhookDebounceMs, 250);
+  });
+
+  test("a zero debounce is legal, so immediate-on-arrival is reachable", () => {
+    const config = searchConfig({
+      PAPERLESS_MCP_WEBHOOK_PORT: "8899",
+      PAPERLESS_MCP_WEBHOOK_SECRET: "s3cret",
+      PAPERLESS_MCP_WEBHOOK_DEBOUNCE_MS: "0",
+    });
+    assert.ok(config);
+    assert.equal(config.webhookDebounceMs, 0);
+  });
+
+  test("an out-of-range port is rejected rather than silently coerced", () => {
+    assert.throws(() =>
+      searchConfig({
+        PAPERLESS_MCP_WEBHOOK_PORT: "70000",
+        PAPERLESS_MCP_WEBHOOK_SECRET: "s3cret",
+      })
+    );
+  });
+
+  test("an out-of-range debounce is rejected", () => {
+    assert.throws(() =>
+      searchConfig({
+        PAPERLESS_MCP_WEBHOOK_PORT: "8899",
+        PAPERLESS_MCP_WEBHOOK_SECRET: "s3cret",
+        PAPERLESS_MCP_WEBHOOK_DEBOUNCE_MS: "-1",
+      })
+    );
   });
 });

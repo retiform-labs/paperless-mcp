@@ -93,7 +93,7 @@ function put(
 
 describe("FTS5 availability", () => {
   test("the build reports FTS5 present (measured, not assumed)", () => {
-    // Measured on the build host under node v24.21.0 / better-sqlite3 13.2.0:
+    // Measured under node v24 / better-sqlite3 13.2.0:
     // compile_options contains ENABLE_FTS5, sqlite 3.54.1, and a
     // `create virtual table ... using fts5(x)` succeeds.
     assert.equal(HAS_FTS5, true);

@@ -26,7 +26,7 @@ interface CapturedRequest {
 }
 
 function stubFetch(
-  respond: (req: CapturedRequest) => { status?: number; body: unknown }
+  respond: (req: CapturedRequest) => { status?: number; body?: unknown; text?: string }
 ): CapturedRequest[] {
   const captured: CapturedRequest[] = [];
   globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
@@ -40,6 +40,14 @@ function stubFetch(
     captured.push(request);
     const result = respond(request);
     const status = result.status ?? 200;
+    // `text` exists so an error-body test can return a non-JSON payload -- an
+    // error page is often HTML, and the client must survive one.
+    if (result.text !== undefined) {
+      return new Response(result.text, {
+        status,
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
     return new Response(JSON.stringify(result.body), {
       status,
       headers: { "Content-Type": "application/json" },
@@ -725,6 +733,70 @@ describe("batching", () => {
     });
     assert.deepEqual(await embedder.embedDocuments([]), []);
     assert.equal(captured.length, 0);
+  });
+});
+
+describe("an http error carries the server's own explanation", () => {
+  test("a rejected request surfaces the server's message, not just the status", async () => {
+    // A bare "status 400" is undiagnosable. The whole cost of the probe that
+    // found this was re-deriving by hand what the server would have said.
+    stubFetch(() => ({
+      status: 400,
+      body: { error: "the input length exceeds the context length" },
+    }));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "none",
+    });
+    await assert.rejects(
+      () => embedder.embedQuery("x"),
+      /status 400[\s\S]*input length exceeds the context length/
+    );
+  });
+
+  test("a long error body is truncated to one line", async () => {
+    // An error page can be an entire HTML document. An unbounded string inside
+    // an exception message is its own defect.
+    const long = `<html>\n<body>${"reason ".repeat(400)}</body></html>`;
+    stubFetch(() => ({ status: 422, text: long }));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "m",
+      prefixMode: "none",
+    });
+    let message = "";
+    try {
+      await embedder.embedQuery("x");
+      assert.fail("expected a rejection");
+    } catch (err) {
+      message = String(err);
+    }
+    assert.match(message, /status 422/);
+    assert.ok(!message.includes("\n"), "the detail must be collapsed to one line");
+    // 300 characters of detail plus the surrounding sentence.
+    assert.ok(message.length < 500, `message was ${message.length} chars`);
+  });
+
+  test("a configured API key never appears in an http error", async () => {
+    const key = "sk-live-do-not-print";
+    stubFetch(() => ({ status: 401, body: { error: "invalid api key" } }));
+    const embedder = new OllamaEmbedder({
+      url: "https://api.example.com/v1",
+      model: "m",
+      prefixMode: "none",
+      apiKey: key,
+    });
+    let message = "";
+    try {
+      await embedder.embedQuery("x");
+      assert.fail("expected a rejection");
+    } catch (err) {
+      message = String(err);
+    }
+    assert.match(message, /status 401/);
+    assert.ok(!message.includes(key), "the credential leaked into the error");
+    assert.ok(!message.includes("Bearer"), "the authorization header leaked");
   });
 });
 

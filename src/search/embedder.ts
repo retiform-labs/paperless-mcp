@@ -444,8 +444,34 @@ export class OllamaEmbedder implements Embedder {
       );
     }
     if (!response.ok) {
+      // ⚠️ CARRY THE SERVER'S OWN EXPLANATION.
+      //
+      // A bare "status 400" is undiagnosable: Ollama answers a rejected input
+      // with a JSON `{"error": "..."}` naming the actual cause, and discarding
+      // it means the only way to find out what the server objected to is to
+      // re-probe it by hand. That is exactly what happened once already, and it
+      // cost more time than this branch.
+      //
+      // The body is truncated and whitespace-collapsed: an error page can be a
+      // full HTML document, and an unbounded string in an exception message is
+      // its own defect. This is the SERVER's text, never a request header, so
+      // it cannot carry the credential.
+      //
+      // ⚠️ It CAN in principle carry document text, if a provider chooses to
+      // echo the offending input back. That is a real trade against
+      // diagnosability and it is bounded deliberately: 300 characters, one
+      // line, and always the server's words rather than ours. A provider that
+      // echoes embeddings input in its errors is worth knowing about anyway.
+      let detail = "";
+      try {
+        const text = (await response.text()).replace(/\s+/g, " ").trim();
+        if (text) detail = `: ${text.slice(0, 300)}`;
+      } catch {
+        // Reading the error body is a diagnostic courtesy; its failure must not
+        // replace the status error with a read error.
+      }
       throw new EmbeddingUnavailableError(
-        `The embedding server answered with status ${response.status} at ${this.endpointUrl}`
+        `The embedding server answered with status ${response.status} at ${this.endpointUrl}${detail}`
       );
     }
     let body: unknown;

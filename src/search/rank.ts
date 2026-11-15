@@ -1,23 +1,23 @@
 // Reciprocal rank fusion of a vector (meaning) list and a text (words) list.
 //
 // Ported verbatim from jaimemachado/paperless-mcp (src/search/rank.ts at
-// 50f7beec0d36804cab8fbcaa7b47f85e562e8061), with one structural change: their
-// only import was `Hit` from ./store, and store.ts does not exist yet in this
-// branch. Hit is declared and exported here instead, so this module compiles
-// and tests on its own. The integration lap should either re-point this to
-// ./store or keep this as the single definition -- see the port report.
+// 50f7beec0d36804cab8fbcaa7b47f85e562e8061). Their only import was `Hit` from
+// ./store; when this file was written store.ts did not exist on this branch, so
+// Hit was declared here to let the module compile and test alone. That
+// declaration is now GONE and store.ts owns Hit -- the merge of the two vector
+// shards put two structurally identical live definitions in one tree, which is
+// a defect whether or not it typechecks. The re-export below is kept so the
+// existing `import { fuse, type Hit } from "./rank"` call sites keep working
+// against the single definition.
 //
 // A document's score is the sum of 1/(k + bestRank) over each list it appears
 // in, using its BEST rank in that list. A document found only by meaning (the
 // vector list) must stay in the results -- that is the whole point of fusing
 // rather than intersecting.
 
-export interface Hit {
-  documentId: number;
-  position: number;
-  text: string;
-  score: number;
-}
+import type { Hit } from "./store";
+
+export type { Hit };
 
 export interface Fused {
   documentId: number;

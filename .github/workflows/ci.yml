@@ -13,11 +13,99 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version-file: ".node-version"
+          cache: "npm"
+
       - name: Install dependencies
         run: npm ci
+
+      # ---------------------------------------------------------------------
+      # BUILD -- and this is not redundant with "Run tests" below.
+      #
+      # The suite runs under ts-node, so it never exercises the compiled
+      # output. That gap shipped a real defect: a test file imported a helper
+      # from above src/, tsc inferred rootDir from the common ancestor of all
+      # emitted files, and output silently nested at build/src/... Meanwhile
+      # main and bin both point at build/index.js, which was then a stale
+      # artifact from a previous week -- and prepack runs `rm -rf build` first,
+      # so a publish would have produced a package with no entrypoint at all.
+      # 473 tests passed and tsc exited 0 the whole time.
+      # ---------------------------------------------------------------------
+      - name: Build
+        run: npm run build
+
+      # A type error must be reported AS a type error, not as a mysterious
+      # ts-node failure inside the test runner. --noEmit keeps this a pure
+      # check: the build above already produced the artifacts.
+      - name: Typecheck
+        # --no-install is deliberate: it makes the step fail if typescript is not
+        # already in node_modules, instead of silently downloading a different
+        # compiler version than the one the lockfile pins.
+        run: npx --no-install tsc --noEmit
+
+      # ---------------------------------------------------------------------
+      # The layout assertion: the specific regression gate for the defect
+      # described on the Build step. Each failure names what went wrong and
+      # why, so a future reader learns the mechanism from the message.
+      # ---------------------------------------------------------------------
+      - name: Assert build layout
+        run: |
+          set -uo pipefail
+
+          fail() {
+            echo "::error title=Build layout check failed::$1"
+            echo ""
+            echo "FAILED: $1"
+            echo ""
+            echo "$2"
+            exit 1
+          }
+
+          # 1. the entrypoint exists
+          if [ ! -f build/index.js ]; then
+            fail "build/index.js does not exist" \
+          "package.json declares main = build/index.js and bin.paperless-mcp = build/index.js,
+          so a build without that file produces an unstartable package. Check that the
+          build step actually ran, and that the include list in tsconfig.json still
+          covers src/."
+          fi
+
+          # 2. output is NOT nested under build/src/
+          if [ -d build/src ]; then
+            fail "build/src/ exists -- tsc rootDir was widened by an import from above src/" \
+          "A directory at build/src/ means TypeScript resolved its rootDir to the repository
+          root instead of src/, so every emitted path gained one extra level. The shipped
+          entrypoint build/index.js is then stale or absent while the real output sits at
+          build/src/index.js.
+
+          CAUSE: something in the compilation graph imports a file outside src/ -- most
+          often a test file importing a helper from ../scripts/, because tsconfig.json
+          sets include to src only but TypeScript follows imports regardless of include.
+
+          FIX: move the imported module under src/ and re-export it, rather than importing
+          upwards out of it. Do not 'fix' this by pointing main at build/src/index.js."
+          fi
+
+          # 3. build/index.js is newer than every file under src/
+          if [ -d src ]; then
+            newer=$(find src -type f -newer build/index.js -print -quit)
+            if [ -n "$newer" ]; then
+              fail "build/index.js is older than src/ ($newer) -- the build is stale" \
+          "A source file is newer than the entrypoint, so build/ does not correspond to the
+          tree under test. This is the failure mode the CI job exists to catch: a stale
+          build passes every ts-node test and only misbehaves for whoever installs the
+          package.
+
+          FIX: make sure the build step runs AFTER checkout, and that build output is not
+          being restored from a cache that predates the source."
+            fi
+          fi
+
+          echo "OK: build/index.js exists, build/src/ is absent, and the build is newer than src/"
+
       - name: Run tests
         run: npm test

@@ -189,6 +189,26 @@ function toFtsMatchTerms(query: string): string[] {
   return match.split(" OR ").map((term) => term.replace(/^"|"$/g, ""));
 }
 
+/**
+ * Every array-valued `type` in a JSON Schema, with its path.
+ *
+ * Same walk as schemaCompat.test.ts, repeated here because that file's server
+ * is built without search config and therefore cannot see these tools.
+ */
+function arrayFormTypes(node: unknown, path = ""): string[] {
+  if (Array.isArray(node)) {
+    return node.flatMap((item, i) => arrayFormTypes(item, `${path}[${i}]`));
+  }
+  if (!node || typeof node !== "object") {
+    return [];
+  }
+  return Object.entries(node as Record<string, unknown>).flatMap(([key, value]) =>
+    key === "type" && Array.isArray(value)
+      ? [`${path}.type = ${JSON.stringify(value)}`]
+      : arrayFormTypes(value, `${path}.${key}`)
+  );
+}
+
 describe("buildPassage", () => {
   test("centres the window on the first query term", () => {
     const content = "a".repeat(500) + " NEEDLE " + "b".repeat(500);
@@ -500,6 +520,35 @@ describe("tool registration — walked from the real tools/list", () => {
       const sync = tools.find((tool) => tool.name === "sync_embeddings")!;
       const properties = (sync.inputSchema as { properties?: Record<string, unknown> }).properties;
       assert.ok(properties && "force" in properties);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("no search tool advertises an array-form `type` (#138)", async () => {
+    // schemaCompat.test.ts already guards the pre-existing tools, but it builds
+    // its server WITHOUT search config, so these three never register there and
+    // would have been uncovered. An array-valued `type` makes strict MCP clients
+    // drop the whole tool silently, and it arrives by collapsing a union of
+    // unchecked primitives -- which a future filter argument could introduce.
+    // The zod pin (~4.4.3) is what prevents it; this is the assertion that the
+    // pin is doing its job for THIS surface.
+    const server = configuredServer();
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "search-tools-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const { tools } = await client.listTools();
+      const searchTools = tools.filter((tool) =>
+        ["semantic_search", "embedding_status", "sync_embeddings"].includes(tool.name)
+      );
+      assert.equal(searchTools.length, 3, "all three search tools must be present to be checked");
+      const offenders = searchTools
+        .flatMap((tool) =>
+          arrayFormTypes(tool.inputSchema).map((hit) => `${tool.name} ${hit}`)
+        )
+        .sort();
+      assert.deepEqual(offenders, []);
     } finally {
       await client.close();
     }

@@ -18,6 +18,9 @@ package/
 # Logs
 logs/
 *.log
+# ...except preserved measurement output. eval/results/ holds the raw run behind a
+# published number; a baseline that is not committed is a baseline nobody can check.
+!eval/results/*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

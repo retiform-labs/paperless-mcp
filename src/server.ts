@@ -52,6 +52,10 @@ export function createMcpServer({
     previousOnClose?.();
     searchContext.close();
   };
+  // Enforced last, so it sees the complete set including the conditional
+  // semantic-search tools.
+  enforceDeterministicToolOrder(server);
+
   return server;
 }
 
@@ -97,6 +101,53 @@ export function sendUnauthorized(res: express.Response): void {
     .status(401)
     .set("WWW-Authenticate", 'Bearer realm="paperless-mcp"')
     .json({ error: "unauthorized" });
+}
+
+/**
+ * Makes the `tools/list` ordering a property of the tool SET rather than of the
+ * order the registration functions happened to run in.
+ *
+ * The MCP spec: "Servers SHOULD return tools in a deterministic order (i.e.,
+ * the same ordering across requests when the underlying set of tools has not
+ * changed). Deterministic ordering enables clients to reliably cache the tool
+ * list and improves LLM prompt cache hit rates when tools are included in
+ * model context."
+ *
+ * Registration order is already stable today -- module evaluation order is
+ * deterministic in Node and nothing here reads a directory or races. But that
+ * makes determinism an ACCIDENT of the call order, not a guarantee. Two things
+ * break it without anyone intending it:
+ *   - reordering a `register*Tools(...)` call, or moving a `server.tool(...)`
+ *     call within one, silently reshuffles the list;
+ *   - `RegisteredTool.update({ name })` is a delete-then-add, so a rename
+ *     moves that tool to the end of the list.
+ * Sorting at the point the list is returned makes both of those no-ops.
+ *
+ * The comparator is `a.name < b.name`, NOT `localeCompare`: locale collation
+ * varies with the host's ICU data, which would trade one non-determinism for a
+ * subtler one. Code-unit comparison is identical on every Node build.
+ *
+ * If the SDK ever stops holding the handler in `_requestHandlers`, this returns
+ * without wrapping and the list falls back to registration order -- still
+ * deterministic, just no longer enforced. It never throws.
+ */
+export function enforceDeterministicToolOrder(server: McpServer): void {
+  const handlers = (server.server as any)?._requestHandlers;
+  if (!(handlers instanceof Map)) return;
+  // Measured from the live handler map, not assumed: the key is the literal
+  // method string, and the SDK has already registered it by the time every
+  // register*Tools() call has returned.
+  const method = "tools/list";
+  const original = handlers.get(method);
+  if (typeof original !== "function") return;
+  handlers.set(method, async (request: unknown, extra: unknown) => {
+    const result = await original(request, extra);
+    if (!result || !Array.isArray(result.tools)) return result;
+    const tools = [...result.tools].sort((a: any, b: any) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+    );
+    return { ...result, tools };
+  });
 }
 
 function buildInstructions(publicUrl: string): string {

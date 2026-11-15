@@ -202,3 +202,15 @@ test("a local validation error is passed through, not relabelled as a network fa
     `a local validation error was relabelled as a transport failure: ${message}`
   );
 });
+
+test("quoted server detail is not left with a doubled full stop", async () => {
+  // "This field may not be blank." is the server's own sentence; the message
+  // supplies its own terminator, so the detail is trimmed before it is quoted.
+  // Cosmetic for a human, but this text is read by a model and is cheaper to
+  // parse clean.
+  const message = await thrownMessage(
+    axiosError({ status: 400, data: { title: ["This field may not be blank."] } })
+  );
+  assert.ok(!/\.\./.test(message), `doubled punctuation: ${message}`);
+  assert.match(message, /title: This field may not be blank\. Fix/);
+});

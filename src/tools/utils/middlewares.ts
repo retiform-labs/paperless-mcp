@@ -53,6 +53,11 @@ function truncate(value: string, max: number): string {
   return collapsed.length <= max ? collapsed : `${collapsed.slice(0, Math.max(0, max - 1))}…`;
 }
 
+/** Truncates, then drops a trailing full stop so callers can punctuate once. */
+function sentenceFragment(value: string, max: number): string {
+  return truncate(value, max).replace(/[.\u3002]+$/, "");
+}
+
 /**
  * JSON.stringify that cannot throw and cannot recurse forever. Circular
  * references become "[circular]"; a value that still defeats serialisation
@@ -159,7 +164,7 @@ function fieldDetails(body: unknown, depth = 0): Array<[string, string]> {
   const pairs: Array<[string, string]> = [];
   for (const [field, value] of Object.entries(body as Record<string, unknown>)) {
     if (typeof value === "string") {
-      pairs.push([field, truncate(value, MAX_DETAIL_CHARS)]);
+      pairs.push([field, sentenceFragment(value, MAX_DETAIL_CHARS)]);
       continue;
     }
     if (Array.isArray(value)) {
@@ -168,7 +173,8 @@ function fieldDetails(body: unknown, depth = 0): Array<[string, string]> {
           typeof item === "string" ? item : safeStringify(item, MAX_DETAIL_CHARS) ?? ""
         )
         .filter((item) => item.length > 0);
-      if (parts.length > 0) pairs.push([field, truncate(parts.join("; "), MAX_DETAIL_CHARS)]);
+      if (parts.length > 0)
+        pairs.push([field, sentenceFragment(parts.join("; "), MAX_DETAIL_CHARS)]);
       continue;
     }
     // Nested shape, e.g. {"custom_fields": {"12": ["bad"]}} -- flatten one level.
@@ -184,7 +190,7 @@ function describeFields(body: unknown): string | undefined {
   const pairs = fieldDetails(body);
   if (pairs.length === 0) return undefined;
   const rendered = pairs.map(([field, detail]) => `${field}: ${detail}`).join("; ");
-  return truncate(rendered, MAX_DETAIL_CHARS);
+  return sentenceFragment(rendered, MAX_DETAIL_CHARS);
 }
 
 /**
@@ -233,7 +239,7 @@ function buildMessage(err: unknown): string {
 
   // --- Server returned an error status.
   const fields = describeFields(body);
-  const quote = fields ?? safeStringify(body, MAX_DETAIL_CHARS);
+  const quote = fields ?? (safeStringify(body, MAX_DETAIL_CHARS) ?? "").replace(/[.\u3002]+$/, "");
 
   if (status === 400 || status === 422) {
     if (fields) {

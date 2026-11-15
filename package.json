@@ -47,13 +47,16 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "axios": "^1.20.0",
+    "better-sqlite3": "^13.2.0",
     "express": "^5.1.0",
     "form-data": "^4.0.2",
+    "sqlite-vec": "^0.1.9",
     "zod": "~4.4.3"
   },
   "devDependencies": {
     "@anthropic-ai/dxt": "^0.2.6",
     "@changesets/cli": "^2.29.4",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.2",
     "@types/node": "^24.0.0",
     "ts-node": "^10.9.2",

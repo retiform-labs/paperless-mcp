@@ -38,7 +38,12 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { PaperlessAPI } from "../api/PaperlessAPI";
-import { searchConfig, indexPath, type SearchConfig } from "../search/config";
+import {
+  searchConfig,
+  indexPath,
+  webhookRefusal,
+  type SearchConfig,
+} from "../search/config";
 import { OllamaEmbedder, EmbeddingUnavailableError, type Embedder } from "../search/embedder";
 import {
   EMBEDDING_DIMENSIONS,
@@ -54,6 +59,7 @@ import {
   type CorpusState,
   type SyncReport,
 } from "../search/sync";
+import { WebhookReceiver } from "../search/webhook";
 import { withErrorHandling } from "./utils/middlewares";
 
 /** A similarity at or above this is a strong match. Similarity, never distance. */
@@ -259,6 +265,8 @@ export class SearchContext {
   private openFailed?: string;
   private sync?: IndexSync;
   private syncStarted = false;
+  private webhook?: WebhookReceiver;
+  private webhookStarted = false;
   private embedder?: Embedder | null;
   private readonly configOverride?: SearchConfig;
   private readonly embedderFactory?: (config: SearchConfig) => Embedder | undefined;
@@ -423,10 +431,82 @@ export class SearchContext {
     return this.sync?.isScheduled === true;
   }
 
+  /**
+   * Start the change-notification receiver when the deployment asked for one.
+   *
+   * ⚠️ THE SAME CALLER PROBLEM AS `startBackgroundSync`, ONE LAYER OUT. A
+   * receiver class nobody constructs is a feature nobody has, and the interval
+   * in this file is the standing proof: it was read, validated and never acted
+   * on. So construction happens here, on the path `registerSearchTools` always
+   * walks, rather than behind a bootstrap only a test would call.
+   *
+   * Started asynchronously and never awaited. Registration is synchronous and
+   * happens before the transport connects; a bind that fails must not delay or
+   * break the tool surface, because the observable `sync_embeddings` tool still
+   * works and the watermark still converges on the next start without it.
+   */
+  startWebhook(api: PaperlessAPI): void {
+    if (this.webhookStarted) return;
+    const config = this.config();
+    if (!config || config.webhookPort === 0) return;
+
+    const refusal = webhookRefusal(config);
+    if (refusal) {
+      console.error(`[paperless-mcp] webhook not started: ${refusal}`);
+      return;
+    }
+
+    // The runner is resolved lazily, per event: building it needs an embedder
+    // and an open store, both of which are expensive and neither of which
+    // should be paid at startup by an install that never receives an event.
+    const receiver = new WebhookReceiver({
+      secret: config.webhookSecret ?? "",
+      port: config.webhookPort,
+      host: config.webhookHost,
+      debounceMs: config.webhookDebounceMs,
+      runner: () => this.syncRunner(api),
+    });
+    this.webhook = receiver;
+    this.webhookStarted = true;
+
+    void receiver.start().catch((err: unknown) => {
+      // A port already in use, or a refused bind. Logged and dropped: the
+      // receiver is optional infrastructure and must not kill the server.
+      console.error(
+        `[paperless-mcp] webhook not started: ${errorMessage(err)}`
+      );
+      this.webhook = undefined;
+      this.webhookStarted = false;
+    });
+  }
+
+  /** True when a receiver is bound. Used by the wiring test. */
+  get isWebhookListening(): boolean {
+    return this.webhook?.isListening === true;
+  }
+
+  /** The port the receiver actually bound, or undefined when it is off. */
+  get webhookPort(): number | undefined {
+    return this.webhook?.boundPort;
+  }
+
   close(): void {
-    // Stop the timer BEFORE dropping the reference, or a stdio child shutting
-    // down leaves an interval firing against a closed store.
+    // Stop the timer and the receiver BEFORE dropping the store, or a stdio
+    // child shutting down leaves a scheduled run firing against a closed index.
+    //
+    // ⚠️ The receiver's close is ASYNC and `close()` is not, so it is started
+    // here and not awaited. That is safe rather than sloppy: the receiver's own
+    // `close()` clears its debounce timer synchronously first, so no new run can
+    // be scheduled from this point on -- only an already-firing one can still be
+    // in flight, and that one is bounded by the store's own `isOpen` state.
     this.sync?.stop();
+    if (this.webhook) {
+      void this.webhook.close().catch(() => {
+        // Nothing useful to do while shutting down.
+      });
+      this.webhook = undefined;
+    }
+    this.webhookStarted = false;
     this.store?.close();
     this.store = undefined;
     this.sync = undefined;
@@ -729,6 +809,9 @@ export function registerSearchTools(
 
   // Opt-in background sync. No-op unless PAPERLESS_MCP_SYNC_INTERVAL_MS > 0.
   context.startBackgroundSync(api);
+  // Opt-in change-notification receiver. No-op unless
+  // PAPERLESS_MCP_WEBHOOK_PORT > 0, and refuses without a secret.
+  context.startWebhook(api);
 
   const filterArgs = FILTER_SHAPE;
 

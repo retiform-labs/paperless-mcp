@@ -112,6 +112,10 @@ Add these to your MCP config file:
 | `PAPERLESS_MCP_MAX_CHUNKS` *(Search)* | No | `4000` | Maximum chunks stored per document. A longer document is truncated, and `embedding_status` reports how many were. Clamped to what the row-id encoding can address; a larger value is reduced rather than refused. |
 | `PAPERLESS_MCP_SYNC_BATCH_SIZE` *(Search)* | No | `16` | Texts sent per embedding request during a sync (1–256). Lower it if your embedding server falls over on larger batches. |
 | `PAPERLESS_MCP_SYNC_INTERVAL_MS` *(Search)* | No | `0` (off) | Interval between automatic incremental syncs (0–86400000). A positive value starts a background timer when the tools register; it runs one sync immediately, then once per interval. `0` means no timer, which is the default — drive `sync_embeddings` from your client instead. The timer is cleared on `close()`. |
+| `PAPERLESS_MCP_WEBHOOK_PORT` *(Search)* | No | `0` (off) | Port for the change-notification receiver. A positive value starts a listener that re-indexes documents as they change, so the index stays current without anything polling. **Off by default**: an install that never asked for a listening socket must not acquire one by upgrading. Requires `PAPERLESS_MCP_WEBHOOK_SECRET`; the receiver refuses to start without one. |
+| `PAPERLESS_MCP_WEBHOOK_SECRET` *(Search)* | Only with the port | — | Shared secret the sender must present, in the `x-paperless-mcp-secret` header or as a `Bearer` token. Compared in constant time. The receiver **refuses to start** when this is unset and the port is set, because an unauthenticated endpoint would let anyone trigger embedding work. |
+| `PAPERLESS_MCP_WEBHOOK_HOST` *(Search)* | No | `127.0.0.1` | Address to bind. Loopback unless you widen it deliberately. **A containerised Paperless-ngx cannot reach `127.0.0.1` on the host** — see the receiver section below. |
+| `PAPERLESS_MCP_WEBHOOK_DEBOUNCE_MS` *(Search)* | No | `2000` | Quiet period before a burst of deliveries becomes one sync. A bulk edit arrives as one request per document within a few seconds; coalescing them means 200 events cost one run, not 200. |
 
 Rows marked *(Search)* belong to the optional semantic-search feature: **setting any one of them
 enables the three search tools**, and each value you set is validated strictly rather than silently
@@ -918,6 +922,133 @@ Semantic search is entirely optional and off until you configure it.
 The index lives at `~/.local/share/paperless-mcp/index/index.db` by default, or wherever `PAPERLESS_MCP_INDEX_DIR` points. It is deliberately **outside** your Paperless-ngx container: it is derived data, it is regenerable by re-running `sync_embeddings`, and putting it inside the container would drag it into that container's backup scope.
 
 **Local embedding only.** The endpoint must be a literal loopback or RFC 1918 address; a DNS name is refused, because a name can resolve to anywhere and indexed text must not leave the host. There is no API-key field and no remote-embedding code path — the constraint cannot be relaxed by configuration.
+
+## Keeping the index current without polling
+
+An incremental sync compares a recorded watermark against the live corpus, so it can tell you
+"nothing changed" in a single request. That works for additions, edits and deletions — but it is
+**structurally blind to one case**: a tag, correspondent or document-type edit is applied through a
+bulk update that never touches a document's `modified` timestamp, and never changes the document
+count. Both watermark scalars therefore read "nothing happened" while the affected documents'
+metadata is genuinely stale in the index.
+
+The only signal that exists for that change is the event. So the server can optionally listen for
+Paperless-ngx's own webhooks and re-index the documents a delivery names.
+
+### Turning it on
+
+Set a port and a shared secret:
+
+```bash
+PAPERLESS_MCP_WEBHOOK_PORT=8899
+PAPERLESS_MCP_WEBHOOK_SECRET=<a-long-random-string>
+```
+
+The receiver is **off by default** (`PAPERLESS_MCP_WEBHOOK_PORT=0`) and **refuses to start if the
+secret is unset**, logging the reason instead. That refusal is deliberate: the endpoint causes
+embedding work, and an unauthenticated trigger for it is a resource-abuse vector, so a warning line
+nobody reads would not be a mitigation.
+
+It is not a replacement for `sync_embeddings` or the background interval. A webhook only reports
+events the process was alive to receive; a document added while the server was down produces no
+delivery at all. The watermark still covers downtime, and the periodic metadata refresh still runs
+as a backstop for a delivery that was attempted and never arrived (the sender retries a few times
+and then gives up).
+
+### Creating the workflow in Paperless-ngx
+
+Paperless-ngx fires webhooks through a *workflow*, which you create once. Nothing here creates it
+for you — it is your instance to configure.
+
+```bash
+curl -X POST "$PAPERLESS_URL/api/workflows/" \
+  -H "Authorization: Token $PAPERLESS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Keep the semantic index current",
+    "enabled": true,
+    "triggers": [
+      { "type": 2, "matching_algorithm": 0 },
+      { "type": 3, "matching_algorithm": 0 }
+    ],
+    "actions": [
+      {
+        "type": 4,
+        "webhook": {
+          "url": "http://172.17.0.1:8899/webhook/paperless",
+          "use_params": true,
+          "as_json": true,
+          "params": { "id": "{{ doc_id }}" },
+          "headers": { "X-Paperless-MCP-Secret": "<a-long-random-string>" }
+        }
+      }
+    ]
+  }'
+```
+
+Notes on that payload, each of which is a way to get it subtly wrong:
+
+- **`type: 2` is "Document Added" and `type: 3` is "Document Updated"** on the trigger; **`type: 4`
+  is "Webhook"** on the action. The trigger types are a separate numbering from the action types.
+- **`"matching_algorithm": 0`** means "no content filter", so the trigger matches every document. A
+  non-zero value makes the trigger filter on document text, which is not what you want here.
+- The template uses **Jinja syntax** (`{{ doc_id }}`), not a different placeholder style, and is
+  rendered before the request is sent. `use_params` with a `params` dictionary posts a form; add
+  `"as_json": true` to post JSON instead. Both are parsed.
+- **The document id must be in the body.** A delivery that names no document still triggers a sync,
+  but an untargeted one — correct, merely more expensive. The receiver cannot infer which document
+  changed, because the payload carries no change description.
+- **The secret goes in `headers`.** The receiver also accepts it as a `Bearer` token if you would
+  rather not add a custom header.
+
+### The container networking reality
+
+**A Paperless-ngx running in a container cannot reach `127.0.0.1` on your host.** That address is
+the *container's* own loopback. If you leave `PAPERLESS_MCP_WEBHOOK_HOST` at its default and point
+the workflow at `127.0.0.1`, deliveries will fail with a connection error.
+
+Two things have to be true instead:
+
+1. **The receiver binds an address the container can route to.** In a default Docker bridge setup
+   the host is reachable from containers at the bridge gateway, commonly `172.17.0.1`. Set
+   `PAPERLESS_MCP_WEBHOOK_HOST` to that (or `0.0.0.0` to listen on all interfaces) and use the same
+   address in the workflow URL. If your containers run on a user-defined network, the gateway is a
+   different address in that subnet; `docker network inspect <network>` shows it.
+2. **Your host firewall permits the traffic.** Most default-DROP firewall configurations will
+   silently swallow a connection from the bridge subnet, which looks exactly like the receiver not
+   running. Permit the port from the bridge subnet specifically, not from everywhere.
+
+Binding `0.0.0.0` widens the endpoint to every interface the host has. That is sometimes the only
+workable choice, and it is why the default is loopback: it should be a decision, not an inheritance.
+
+### How a delivery is handled
+
+- The endpoint answers **`202 Accepted` before doing any work.** The sender times out after a few
+  seconds and retries on failure, so acknowledging first is what turns those retries into harmless
+  duplicates instead of repeated embedding runs.
+- Deliveries are **coalesced**: ids are collected and one sync runs after a quiet period. A bulk
+  edit that produces hundreds of deliveries produces one run naming every affected document.
+- A delivery for a document that no longer exists is **counted as a failure and skipped**; the rest
+  of the batch proceeds. A delivery can be in flight when its document is deleted, and that is not a
+  reason to abandon the others.
+- **Deletions produce no delivery.** Paperless-ngx's trigger set has no delete type, so the
+  document count in the watermark remains the only thing that notices one. This is stated plainly
+  rather than worked around: there is no event to listen for.
+
+### Verifying it
+
+Send one delivery yourself — the receiver accepts anything that presents the secret:
+
+```bash
+curl -i -X POST "http://127.0.0.1:8899/webhook/paperless" \
+  -H "X-Paperless-MCP-Secret: <a-long-random-string>" \
+  -H "Content-Type: application/json" \
+  -d '{"id": 1}'
+```
+
+A `202` means it was accepted; the sync then runs after the debounce period, and its log line
+reports what it found. A `401` means the secret did not match, and a `413` means the body was over
+the 1 MB cap.
 
 ## Error Handling
 

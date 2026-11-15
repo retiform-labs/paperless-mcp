@@ -126,6 +126,10 @@ function makeContext(opts: {
     syncIntervalMs: 0,
     embeddingLocalOnly: false,
     embeddingApiKey: undefined,
+    webhookPort: 0,
+    webhookSecret: undefined,
+    webhookHost: "127.0.0.1",
+    webhookDebounceMs: 2000,
   };
   // The factory states "no embedder" rather than leaving it unset: unset would
   // be resolved into a REAL Ollama client, and Ollama is listening on this box.
@@ -506,6 +510,10 @@ describe("degradation — the three states are distinguishable", () => {
       syncIntervalMs: 0,
       embeddingLocalOnly: false,
       embeddingApiKey: undefined,
+      webhookPort: 0,
+      webhookSecret: undefined,
+      webhookHost: "127.0.0.1",
+      webhookDebounceMs: 2000,
     };
     const context = new SearchContext(config, () => undefined);
     const seed = new SearchIndex(path, { fts5: false });
@@ -690,6 +698,10 @@ describe("sync_embeddings force:true — probe before delete", () => {
       syncIntervalMs: 0,
       embeddingLocalOnly: false,
       embeddingApiKey: undefined,
+      webhookPort: 0,
+      webhookSecret: undefined,
+      webhookHost: "127.0.0.1",
+      webhookDebounceMs: 2000,
     };
     const embedder = new StubEmbedder(1);
     if (opts.embedderFails) {
@@ -892,6 +904,10 @@ describe("PAPERLESS_MCP_SYNC_BATCH_SIZE reaches the embedder — the caller exis
       syncIntervalMs: 0,
       embeddingLocalOnly: false,
       embeddingApiKey: undefined,
+      webhookPort: 0,
+      webhookSecret: undefined,
+      webhookHost: "127.0.0.1",
+      webhookDebounceMs: 2000,
     };
     return new SearchContext(config);
   }
@@ -945,6 +961,10 @@ describe("PAPERLESS_MCP_SYNC_INTERVAL_MS starts a timer — the caller exists", 
       syncIntervalMs: intervalMs,
       embeddingLocalOnly: false,
       embeddingApiKey: undefined,
+      webhookPort: 0,
+      webhookSecret: undefined,
+      webhookHost: "127.0.0.1",
+      webhookDebounceMs: 2000,
     };
     const context = new SearchContext(config, () => new StubEmbedder());
     return context;
@@ -1051,6 +1071,10 @@ describe("tool registration — walked from the real tools/list", () => {
       syncIntervalMs: 0,
       embeddingLocalOnly: false,
       embeddingApiKey: undefined,
+      webhookPort: 0,
+      webhookSecret: undefined,
+      webhookHost: "127.0.0.1",
+      webhookDebounceMs: 2000,
     };
     const server = createMcpServer({
       baseUrl: "http://paperless.test",

@@ -13,10 +13,10 @@ import { join } from "node:path";
  *    that must not send text off the host is a flag it sets --
  *    `PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY=true` -- not a restriction compiled
  *    into the library on its behalf.
- *  - There is NO `useHttp` gate. That gate made semantic search dead on arrival
- *    in our deployment, because the gateway child is launched with no CLI args
- *    (`args: ["/path/to/build/index.js"]`) and so `--http`
- *    is never true. Nothing about a local sqlite index requires HTTP transport.
+ *  - There is NO `useHttp` gate. That gate makes semantic search dead on
+ *    arrival for any deployment that launches this package as a stdio child
+ *    with no CLI arguments, because `--http` is then never true. Nothing about
+ *    a local sqlite index requires HTTP transport.
  *  - There is NO `DATABASE_URL`. The store is a file path.
  *  - Every value here has a working default, so "all four or none" would be
  *    meaningless. The rule instead is: any search variable present enables the
@@ -38,6 +38,20 @@ export interface SearchConfig {
   readonly embeddingLocalOnly: boolean;
   /** Bearer token for the embedding endpoint, when one is required. */
   readonly embeddingApiKey: string | undefined;
+  /**
+   * Port the change-notification receiver listens on.
+   *
+   * 0 means OFF, and 0 is the default. The receiver is a listening socket in a
+   * process that was previously a pure stdio client; an install that did not
+   * ask for one must not acquire one by upgrading.
+   */
+  readonly webhookPort: number;
+  /** Shared secret the sender must present. Required whenever the port is on. */
+  readonly webhookSecret: string | undefined;
+  /** Address to bind. Loopback unless an operator widens it deliberately. */
+  readonly webhookHost: string;
+  /** Quiet period before a burst of events becomes one run. */
+  readonly webhookDebounceMs: number;
 }
 
 /**
@@ -73,6 +87,19 @@ export const DEFAULT_SYNC_BATCH_SIZE = 16;
 export const DEFAULT_EMBEDDING_LOCAL_ONLY = false;
 /** 0 means "no background sync". Opting in is explicit, never a default. */
 export const DEFAULT_SYNC_INTERVAL_MS = 0;
+/** 0 means "no change-notification receiver". Same reasoning as the interval. */
+export const DEFAULT_WEBHOOK_PORT = 0;
+/**
+ * Loopback, and it has to be said out loud rather than inherited from Node.
+ *
+ * A listener that defaults to every interface is reachable from anywhere the
+ * host is, which for an endpoint that triggers embedding work is a decision the
+ * operator should have made. A containerised sender cannot reach loopback and
+ * must therefore set this -- which is the intended friction.
+ */
+export const DEFAULT_WEBHOOK_HOST = "127.0.0.1";
+/** Long enough to absorb a bulk edit's burst, short enough to feel immediate. */
+export const DEFAULT_WEBHOOK_DEBOUNCE_MS = 2000;
 
 export function defaultIndexDir(): string {
   return join(homedir(), ".local", "share", "paperless-mcp", "index");
@@ -99,6 +126,10 @@ const SPECS = {
   syncIntervalMs: { preferred: "PAPERLESS_MCP_SYNC_INTERVAL_MS", fallback: "SYNC_INTERVAL_MS" },
   embeddingLocalOnly: { preferred: "PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY" },
   embeddingApiKey: { preferred: "PAPERLESS_MCP_EMBEDDING_API_KEY", fallback: "EMBEDDING_API_KEY" },
+  webhookPort: { preferred: "PAPERLESS_MCP_WEBHOOK_PORT" },
+  webhookSecret: { preferred: "PAPERLESS_MCP_WEBHOOK_SECRET" },
+  webhookHost: { preferred: "PAPERLESS_MCP_WEBHOOK_HOST" },
+  webhookDebounceMs: { preferred: "PAPERLESS_MCP_WEBHOOK_DEBOUNCE_MS" },
 } as const satisfies Record<string, EnvSpec>;
 
 function readVar(
@@ -199,6 +230,10 @@ export function searchConfig(
   const syncIntervalMs = readVar(env, SPECS.syncIntervalMs);
   const embeddingLocalOnly = readVar(env, SPECS.embeddingLocalOnly);
   const embeddingApiKey = readVar(env, SPECS.embeddingApiKey);
+  const webhookPort = readVar(env, SPECS.webhookPort);
+  const webhookSecret = readVar(env, SPECS.webhookSecret);
+  const webhookHost = readVar(env, SPECS.webhookHost);
+  const webhookDebounceMs = readVar(env, SPECS.webhookDebounceMs);
 
   // ⚠️ `embeddingApiKey` deliberately does NOT appear in this list, and the
   // asymmetry is the point: a credential is a modifier, not a request to turn
@@ -214,6 +249,12 @@ export function searchConfig(
     syncBatchSize,
     syncIntervalMs,
     embeddingLocalOnly,
+    // ⚠️ ONLY the PORT turns the feature on. The secret, the host and the
+    // debounce are modifiers: an environment that happens to export a secret,
+    // or a bind address, has not asked for a listener. Counting a bind address
+    // here would mean a deployment that widened it and then removed the port
+    // silently kept a socket open.
+    webhookPort,
   ].some(Boolean);
   if (!anySet) return undefined;
 
@@ -242,7 +283,44 @@ export function searchConfig(
       ? toBoolean(embeddingLocalOnly.name, embeddingLocalOnly.value)
       : DEFAULT_EMBEDDING_LOCAL_ONLY,
     embeddingApiKey: embeddingApiKey?.value,
+    webhookPort: webhookPort
+      ? toNumber(webhookPort.name, webhookPort.value, { min: 0, max: 65535, integer: true })
+      : DEFAULT_WEBHOOK_PORT,
+    webhookSecret: webhookSecret?.value,
+    webhookHost: webhookHost?.value ?? DEFAULT_WEBHOOK_HOST,
+    webhookDebounceMs: webhookDebounceMs
+      ? toNumber(webhookDebounceMs.name, webhookDebounceMs.value, {
+          min: 0,
+          max: 600000,
+          integer: true,
+        })
+      : DEFAULT_WEBHOOK_DEBOUNCE_MS,
   };
+}
+
+/**
+ * Whether the receiver may start, and why not when it may not.
+ *
+ * ⚠️ A PORT WITHOUT A SECRET IS A CONFIGURATION ERROR, NOT A WARNING. The
+ * endpoint causes embedding work; an unauthenticated trigger for that is a
+ * resource-abuse vector, and a log line nobody reads is not a mitigation. So
+ * this returns a reason rather than a boolean -- the caller decides whether to
+ * log and continue (a background sync failing to start must not take down tool
+ * registration) or to fail, and either way the reason reaches the operator
+ * verbatim instead of being reconstructed.
+ */
+export function webhookRefusal(config: SearchConfig): string | undefined {
+  if (config.webhookPort === 0) return undefined;
+  if (!config.webhookSecret) {
+    return (
+      "PAPERLESS_MCP_WEBHOOK_PORT is set but PAPERLESS_MCP_WEBHOOK_SECRET is " +
+      "not. The receiver refuses to start without a shared secret: it triggers " +
+      "embedding work, so an unauthenticated endpoint is a resource-abuse " +
+      "vector. Set the secret to a value the Paperless workflow will send, or " +
+      "unset the port to keep the receiver off."
+    );
+  }
+  return undefined;
 }
 
 /** The index file inside the configured directory. */

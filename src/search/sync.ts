@@ -323,6 +323,8 @@ export class IndexSync {
   private readonly maxListPages: number;
   private timer?: ReturnType<typeof setInterval>;
   private running?: Promise<SyncReport>;
+  /** Whether the run in flight is a targeted one. See `run()`. */
+  private runningTargeted = false;
 
   constructor(opts: {
     api: PaperlessAPI;
@@ -351,10 +353,33 @@ export class IndexSync {
    * against the same stale `indexed()` snapshot and the loser's deletes would
    * remove the winner's work.
    */
-  run(opts: { force?: boolean } = {}): Promise<SyncReport> {
+  run(opts: { force?: boolean; documentIds?: number[] } = {}): Promise<SyncReport> {
+    const targeted = (opts.documentIds?.length ?? 0) > 0;
+
+    // ⚠️ A TARGETED RUN AND A FULL RUN ANSWER DIFFERENT QUESTIONS, SO THEY MUST
+    // NOT SHARE ONE PROMISE.
+    //
+    // Joining is right when both callers want the same sweep: two scheduler
+    // ticks, or a tool call landing on a run already in flight. It is wrong when
+    // a full run joins a targeted one -- the full caller would receive a report
+    // covering one document and read it as "the corpus is up to date", which is
+    // the exact substitution this whole subsystem exists to avoid.
+    //
+    // So a full run requested during a targeted run is SEQUENCED behind it
+    // rather than joined to it. Same path, one run after the other; no second
+    // sync implementation.
+    if (!targeted && this.running && this.runningTargeted) {
+      return this.running.then(
+        () => this.run(opts),
+        () => this.run(opts)
+      );
+    }
+
     if (!this.running) {
+      this.runningTargeted = targeted;
       this.running = this.doRun(opts).finally(() => {
         this.running = undefined;
+        this.runningTargeted = false;
       });
     }
     return this.running;
@@ -421,7 +446,7 @@ export class IndexSync {
     }
   }
 
-  private async syncAll(opts: { force?: boolean }): Promise<SyncReport> {
+  private async syncAll(opts: { force?: boolean; documentIds?: number[] }): Promise<SyncReport> {
     const report: SyncReport = {
       added: 0,
       updated: 0,
@@ -452,6 +477,75 @@ export class IndexSync {
       model: this.embedder.model,
       prefixMode: this.embedder.prefixMode,
     });
+
+    // ── TARGETED RUN: THE CALLER NAMED THE DOCUMENTS ────────────────────────
+    //
+    // This is the webhook's path. A delivery that named ids is a statement
+    // about THOSE documents, and re-indexing exactly those is both cheaper and
+    // more complete than any corpus-level signal could be.
+    //
+    // ⚠️ WHY THIS CANNOT BE EXPRESSED AS THE WATERMARK DIFF, which is the whole
+    // reason it is a separate branch. A tag, correspondent or document-type
+    // edit goes through a queryset update on a through-table: `auto_now` never
+    // fires, so `modified` does not move, and the document count is unchanged.
+    // Both watermark scalars therefore read "nothing happened" while the
+    // document's metadata chunk has genuinely gone stale. The event is the only
+    // signal that exists for that change, and it names the document, so there
+    // is no reason to go looking for one at corpus scale.
+    //
+    // The document is re-fetched in full, so content and metadata are both
+    // rebuilt. That is deliberate: the payload carries no change type, so
+    // deciding between a content reindex and a metadata-only refresh would mean
+    // guessing. One detail fetch settles it by observation.
+    if (opts.documentIds && opts.documentIds.length > 0) {
+      const ids = [...new Set(opts.documentIds)];
+      // ⚠️ SNAPSHOT BEFORE THE LOOP, exactly as the full path does. Reading
+      // `indexed()` per document would consult it AFTER that document was
+      // written, so every document would classify as "updated" and `added`
+      // would always be zero -- a count that is wrong in the flattering
+      // direction, and wrong for a reason no assertion about the index's final
+      // contents could detect.
+      const indexedBefore = this.store.indexed();
+      let names: NameMaps | undefined;
+      for (const id of ids) {
+        try {
+          names ??= await this.loadNames();
+          const context = await this.syncDocument(id, names);
+          report.splits += context.splits;
+          if (indexedBefore.has(id)) report.updated++;
+          else report.added++;
+        } catch (err) {
+          if (err instanceof EmbeddingUnavailableError) {
+            // Same reasoning as the full path: every remaining document would
+            // fail identically, so the run stops and the index keeps what it
+            // has. The next delivery retries.
+            log(
+              `document ${describeDocument(err, id)} failed and the targeted ` +
+                `run is ABORTING: ${errorMessage(err)}`
+            );
+            throw err;
+          }
+          // ⚠️ A DOCUMENT THAT NO LONGER EXISTS MUST NOT ABORT THE RUN. A
+          // delivery can arrive for a document deleted between the change and
+          // the webhook — the event is already in flight and cannot be
+          // recalled. Counting it as `failed` and continuing is the whole
+          // handling; the deletion itself is the watermark's `count` check,
+          // because the sending side fires nothing on delete.
+          report.failed++;
+          log(
+            `document ${describeDocument(err, id)} failed; CONTINUING (a ` +
+              `delivery may name a document deleted since the change): ` +
+              `${errorMessage(err)}`
+          );
+        }
+      }
+      // ⚠️ THE WATERMARK IS NOT WRITTEN HERE, AND MUST NOT BE. It states "the
+      // corpus is indexed through this point", and a targeted run has looked at
+      // a handful of documents rather than the corpus. Recording one would claim
+      // a sweep that never happened and stop the next full run from doing it.
+      report.skipped = false;
+      return report;
+    }
 
     // ── THE WATERMARK, CONSULTED BEFORE ANY PAGING ──────────────────────────
     //

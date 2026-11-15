@@ -19,6 +19,10 @@ import {
   decodeChunkRowid,
   toFtsMatch,
 } from "./store";
+// The mismatch class lives with the prefix logic, not with the store, so a
+// `open()` test asserting on it has to reach across. Importing it rather than
+// matching the message keeps the two in step if the wording ever changes.
+import { PrefixModeMismatchError } from "./embedder";
 
 let dir: string;
 
@@ -432,6 +436,119 @@ describe("index metadata", () => {
     }
   });
 
+  /**
+   * THE ASSERT HAS TO FIRE ON `open()`, NOT ONLY WHEN SOMEONE CALLS IT.
+   *
+   * `assertSchemaCompatible` was dead code -- no production call site -- so a
+   * prefix-mode mismatch could never be refused, no matter what its own KDoc
+   * promised. These four tests drive it through the CONSTRUCTOR path, which is
+   * what a real query does, rather than calling the assertion directly (which
+   * is what makes the function green while the guard is absent).
+   */
+  test("open() throws on a prefix-mode mismatch when an expected meta is supplied", () => {
+    const path = tempIndexPath();
+    const first = new SearchIndex(path);
+    first.open();
+    first.writeMeta({
+      schemaVersion: SCHEMA_VERSION,
+      dimensions: EMBEDDING_DIMENSIONS,
+      model: "nomic-embed-text",
+      prefixMode: "nomic",
+    });
+    first.close();
+
+    assert.throws(
+      () =>
+        new SearchIndex(path, {
+          expected: { dimensions: EMBEDDING_DIMENSIONS, model: "nomic-embed-text", prefixMode: "e5" },
+        }).open(),
+      PrefixModeMismatchError
+    );
+  });
+
+  test("open() throws on a same-width model swap", () => {
+    // Same 768 dimensions, different model: the vector space differs even though
+    // every arithmetic check passes. This is the case a dimension check cannot
+    // catch, and the one that returns plausible nonsense instead of an error.
+    const path = tempIndexPath();
+    const first = new SearchIndex(path);
+    first.open();
+    first.writeMeta({
+      schemaVersion: SCHEMA_VERSION,
+      dimensions: EMBEDDING_DIMENSIONS,
+      model: "nomic-embed-text",
+      prefixMode: "nomic",
+    });
+    first.close();
+
+    assert.throws(
+      () =>
+        new SearchIndex(path, {
+          expected: { dimensions: EMBEDDING_DIMENSIONS, model: "some-other-768-model", prefixMode: "nomic" },
+        }).open(),
+      /built with model "nomic-embed-text"/
+    );
+  });
+
+  test("open() throws on a bumped schema_version", () => {
+    const path = tempIndexPath();
+    const first = new SearchIndex(path);
+    first.open();
+    first.writeMeta({
+      schemaVersion: SCHEMA_VERSION,
+      dimensions: EMBEDDING_DIMENSIONS,
+      model: "nomic-embed-text",
+      prefixMode: "nomic",
+    });
+    first.close();
+
+    // Force a future version into the row through a plain SQLite handle, the way
+    // a newer build would have written it: `writeMeta` refuses to downgrade, so
+    // it is the wrong instrument for manufacturing the state under test.
+    const raw = new Database(path);
+    raw.prepare("UPDATE index_meta SET value = '99' WHERE key = 'schema_version'").run();
+    raw.close();
+
+    assert.throws(
+      () =>
+        new SearchIndex(path, {
+          expected: { dimensions: EMBEDDING_DIMENSIONS, model: "nomic-embed-text", prefixMode: "nomic" },
+        }).open(),
+      /schema_version 99/
+    );
+  });
+
+  test("open() succeeds on a matching meta, and on a brand-new empty index", () => {
+    // The negative cases above are useless if the guard refuses everything. Two
+    // positives: a matching index opens, and a FRESH one opens too -- because
+    // refusing a fresh index would make the first `sync_embeddings` unable to
+    // create the thing it exists to create.
+    const path = tempIndexPath();
+    const first = new SearchIndex(path);
+    first.open();
+    first.writeMeta({
+      schemaVersion: SCHEMA_VERSION,
+      dimensions: EMBEDDING_DIMENSIONS,
+      model: "nomic-embed-text",
+      prefixMode: "nomic",
+    });
+    first.close();
+
+    const reopened = new SearchIndex(path, {
+      expected: { dimensions: EMBEDDING_DIMENSIONS, model: "nomic-embed-text", prefixMode: "nomic" },
+    });
+    reopened.open();
+    assert.equal(reopened.meta()?.prefixMode, "nomic");
+    reopened.close();
+
+    const fresh = new SearchIndex(tempIndexPath(), {
+      expected: { dimensions: EMBEDDING_DIMENSIONS, model: "nomic-embed-text", prefixMode: "nomic" },
+    });
+    fresh.open();
+    assert.equal(fresh.meta(), undefined);
+    fresh.close();
+  });
+
   test("assertSchemaCompatible refuses an unknown schema_version", () => {
     const index = openIndex();
     try {
@@ -672,6 +789,59 @@ describe("document bookkeeping", () => {
         hits.map((hit) => hit.documentId).sort((a, b) => a - b),
         [1, 2]
       );
+    } finally {
+      index.close();
+    }
+  });
+
+  test("one giant document plus many small ones still fills the limit", () => {
+    // THE FIXTURE THAT IS THE WHOLE POINT OF THE WIDENING FIX.
+    //
+    // The store returns one hit per document, so a fixed over-fetch of `k`
+    // candidates can only ever yield as many documents as those k rows happen
+    // to contain. Measured live: 10 requested, **1** returned, with 59 other
+    // documents present -- every one of the 200 (and then 800) nearest rows
+    // belonged to a single 4,000-chunk document.
+    //
+    // Built here with document 1 owning a full 4,000 chunks, which is the
+    // MAX_CHUNKS default and therefore the real live shape rather than a
+    // contrived one. Documents 2..20 are single-chunk.
+    const index = openIndex();
+    try {
+      const giant: StoredChunk[] = [];
+      for (let position = 0; position < 4000; position += 1) {
+        // All at distance 0 from the query axis, so they occupy the entire top
+        // of the ranking and the budget must widen past every one of them.
+        giant.push(chunk("content", `g${position}`, 0));
+      }
+      giant.unshift(chunk("metadata", "Giant document.", 0));
+      put(index, 1, giant);
+      for (let id = 2; id <= 20; id += 1) {
+        put(index, id, [chunk("content", `small ${id}`, 0)]);
+      }
+
+      const hits = index.vectorHits(axisVector(0), 10);
+      const distinct = new Set(hits.map((hit) => hit.documentId));
+      assert.equal(
+        distinct.size,
+        10,
+        `expected 10 distinct documents, got ${distinct.size} -- the giant ` +
+          `document consumed the whole candidate budget`
+      );
+    } finally {
+      index.close();
+    }
+  });
+
+  test("the widening is bounded, so a corpus smaller than the limit terminates", () => {
+    // The loop widens until `limit` distinct documents are found OR the pool is
+    // exhausted OR the ceiling is hit. A corpus of 3 documents asked for 50 must
+    // return 3 and stop -- not loop, not throw.
+    const index = openIndex();
+    try {
+      for (let id = 1; id <= 3; id += 1) put(index, id, [chunk("content", `c${id}`, 0)]);
+      const hits = index.vectorHits(axisVector(0), 50);
+      assert.equal(new Set(hits.map((hit) => hit.documentId)).size, 3);
     } finally {
       index.close();
     }

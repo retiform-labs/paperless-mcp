@@ -21,6 +21,12 @@ import { PrefixMode } from "./config";
  */
 
 const BATCH_SIZE = 16;
+
+/**
+ * The string a liveness probe embeds. A constant, never document text: a probe
+ * must not put restricted material on the wire just to test connectivity.
+ */
+const PROBE_TEXT = "ping";
 const DOCUMENT_TIMEOUT_MS = 300_000;
 const QUERY_TIMEOUT_MS = 30_000;
 
@@ -45,6 +51,18 @@ export interface Embedder {
   readonly dimensions: number;
   embedDocuments(texts: string[]): Promise<number[][]>;
   embedQuery(query: string): Promise<number[]>;
+  /**
+   * Cheap liveness check that must NOT be assumed equivalent to "constructed".
+   *
+   * The local-only guard validates the URL in the constructor, so a constructed
+   * embedder proves nothing about whether anything is listening. Callers that
+   * are about to do something irreversible — `sync_embeddings` with
+   * `force:true` deletes the entire index before it re-embeds — must probe
+   * first, or an outage on a 58-minute rebuild leaves no index at all.
+   *
+   * Optional so existing fakes stay valid; callers fall back to `embedQuery`.
+   */
+  probe?(): Promise<void>;
 }
 
 /**
@@ -243,6 +261,22 @@ export class OllamaEmbedder implements Embedder {
     return embedding;
   }
 
+  /**
+   * Embed one throwaway string and discard it.
+   *
+   * Deliberately a real embedding rather than a GET to the server's root: an
+   * Ollama that is up but has not pulled the model answers GET happily and then
+   * fails on the first real request. The whole point of the probe is to fail
+   * BEFORE an irreversible step, so it has to exercise the thing that will
+   * actually run — the same model, the same prefix, the same endpoint.
+   *
+   * The string is a constant, not document text, so nothing restricted is
+   * placed on the wire for a liveness check.
+   */
+  async probe(): Promise<void> {
+    await this.request([PROBE_TEXT], QUERY_TIMEOUT_MS);
+  }
+
   private async request(
     input: string[],
     timeoutMs: number
@@ -250,13 +284,24 @@ export class OllamaEmbedder implements Embedder {
     if (input.length === 0) return [];
     let response: Response;
     try {
+      // `redirect: "error"` is the local-only guard's request-time half. The gate
+      // validates the endpoint ONCE, in the constructor; a 307 answer would
+      // otherwise let a compromised local endpoint forward the body -- which is
+      // restricted document text -- to any host it likes, with the gate still
+      // reading as satisfied. Checked: this is the only outbound `fetch` in
+      // non-test source, so one option closes the only such path.
       response = await fetch(this.endpoint(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: this.model, input }),
         signal: AbortSignal.timeout(timeoutMs),
+        redirect: "error",
       });
     } catch (err) {
+      // A refused redirect surfaces here as a TypeError from undici. It is
+      // reported as unavailable rather than as its own class because the
+      // caller's correct response is the same -- stop, do not write vectors --
+      // and the message carries the real cause.
       throw new EmbeddingUnavailableError(
         `The embedding server did not answer at ${this.endpoint()}: ${err}`
       );

@@ -7,7 +7,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { PaperlessAPI } from "../api/PaperlessAPI";
 import type { SearchConfig } from "../search/config";
-import { EMBEDDING_DIMENSIONS, SearchIndex, toFtsMatch } from "../search/store";
+import {
+  EMBEDDING_DIMENSIONS,
+  SCHEMA_VERSION,
+  SearchIndex,
+  toFtsMatch,
+} from "../search/store";
 import { EmbeddingUnavailableError, type Embedder } from "../search/embedder";
 import { createMcpServer } from "../server";
 import {
@@ -73,6 +78,7 @@ const DOCUMENTS: VisibleDocument[] = [
       "The three humours. " + "padding ".repeat(60) + " prana disorders arise from the wind element. ".repeat(3),
     correspondent: 1,
     document_type: 1,
+    storage_path: 1,
     tags: [1],
     created: "2026-10-01",
   },
@@ -82,6 +88,7 @@ const DOCUMENTS: VisibleDocument[] = [
     content: "Submission requires authorization. " + "padding ".repeat(200),
     correspondent: 2,
     document_type: 1,
+    storage_path: 2,
     tags: [2],
     created: "2026-11-01",
   },
@@ -402,6 +409,194 @@ describe("the degradation contract", () => {
   });
 });
 
+/**
+ * THE THREE DEGRADATION STATES, one test each.
+ *
+ * These had NO tests at all, and the predicate that governed them asserted a
+ * mechanism that had not happened: it fired on `both lists empty` and announced
+ * "no lexical fallback exists", which is false whenever FTS5 is present and
+ * simply had no match.
+ */
+describe("degradation — the three states are distinguishable", () => {
+  test("(a) both retrievers ran and nothing matched — allowed, and says so", async () => {
+    const embedder = new StubEmbedder(1);
+    // EMPTY corpus: the stub embedder answers a fixed axis regardless of the
+    // query, so a populated index would match "zzzznothing" by vector and this
+    // test would be asserting about a non-empty result.
+    const { context, index, documents } = makeContext({ embedder, documents: [] });
+    try {
+      const result = await runSemanticSearch(context, "zzzznothing", {
+        limit: 5,
+        window: 200,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+      });
+      // The absence of a result is a real answer, and the payload must carry
+      // enough to prove which retrievers produced it.
+      assert.equal(result.passages.length, 0);
+      assert.equal(result.semantic, "ok");
+      assert.deepEqual(result.retrievers.sort(), ["lexical", "vector"]);
+      assert.equal(result.degraded_reason, undefined);
+      assert.equal(result.filtered_out, 0);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("(b) lexical ran and the embedder was down — results, unavailable, and a reason", async () => {
+    const embedder = new StubEmbedder(1);
+    embedder.failWith = new EmbeddingUnavailableError("ollama is down");
+    const { context, index, documents } = makeContext({ embedder });
+    try {
+      const result = await runSemanticSearch(context, "prana", {
+        limit: 5,
+        window: 200,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+      });
+      assert.equal(result.semantic, "unavailable");
+      assert.deepEqual(result.retrievers, ["lexical"]);
+      assert.ok(result.passages.length > 0, "the lexical half must still answer");
+      assert.match(String(result.degraded_reason), /ollama is down/);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("(b') lexical available, embedder down, NOTHING lexically matched — still not an error", async () => {
+    // This is the case the old guard got wrong. FTS5 is present, the embedder is
+    // down, and the lexical search legitimately finds nothing. The old predicate
+    // (both empty + unavailable) threw "no lexical fallback exists" — a false
+    // statement about the build, delivered to a caller that had simply searched
+    // for a word the corpus does not contain.
+    const embedder = new StubEmbedder(1);
+    embedder.failWith = new EmbeddingUnavailableError("ollama is down");
+    // Empty corpus for the same reason as (a): the lexical miss has to be real,
+    // not a vector hit masquerading as one.
+    const { context, index, documents } = makeContext({ embedder, documents: [] });
+    try {
+      const result = await runSemanticSearch(context, "zzzznothing", {
+        limit: 5,
+        window: 200,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+      });
+      assert.equal(result.passages.length, 0);
+      assert.equal(result.semantic, "unavailable");
+      // The retriever list is the proof lexical RAN, which is exactly what the
+      // old message denied.
+      assert.deepEqual(result.retrievers, ["lexical"]);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("(c) neither retriever is capable — refuses with an error, never a silent empty", async () => {
+    // A store built with `fts5: false` and no embedder: genuinely nothing to
+    // search with. The capability, not the emptiness, is what must decide.
+    const indexDir = tempIndexPath();
+    mkdirSync(indexDir, { recursive: true });
+    const path = join(indexDir, "index.db");
+    const config: SearchConfig = {
+      embeddingUrl: "http://127.0.0.1:11434",
+      model: "stub-embed",
+      prefixMode: "none",
+      indexDir,
+      maxChunks: 4000,
+      syncBatchSize: 16,
+      syncIntervalMs: 0,
+    };
+    const context = new SearchContext(config, () => undefined);
+    const seed = new SearchIndex(path, { fts5: false });
+    seed.open();
+    seed.writeMeta({
+      schemaVersion: SCHEMA_VERSION,
+      dimensions: EMBEDDING_DIMENSIONS,
+      model: "stub-embed",
+      prefixMode: "none",
+    });
+    seed.close();
+    // The context must open the same no-FTS5 store, or the fixture tests a
+    // different build from the one the capability flag describes.
+    const store = new SearchIndex(path, { fts5: false });
+    store.open();
+    (context as unknown as { store: SearchIndex }).store = store;
+    try {
+      assert.equal(store.lexicalAvailable, false);
+      await assert.rejects(
+        () =>
+          runSemanticSearch(context, "anything", {
+            limit: 5,
+            window: 200,
+            loadDocuments: async () => new Map(),
+          }),
+        /neither the vector side nor a lexical fallback can run/
+      );
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe("filtered_out — post-filter accounting for total_hits", () => {
+  test("an all-filtered-out result explains itself instead of returning 12 and 0", async () => {
+    // The exact shape the brief named: total_hits 12, passages [], nothing said.
+    const embedder = new StubEmbedder(1);
+    const { context, index, documents } = makeContext({ embedder });
+    try {
+      const result = await runSemanticSearch(context, "prana", {
+        limit: 5,
+        window: 200,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+        // Rejects every document.
+        filters: () => false,
+      });
+      assert.ok(result.total_hits > 0, "the retrievers did find things");
+      assert.equal(result.passages.length, 0);
+      assert.equal(result.filtered_out, result.total_hits);
+      assert.deepEqual(result.filtered_out_reasons, {
+        document_unavailable: 0,
+        metadata_filter: result.total_hits,
+      });
+    } finally {
+      index.close();
+    }
+  });
+
+  test("an unfetchable document is counted separately from a filter rejection", async () => {
+    const embedder = new StubEmbedder(1);
+    const { context, index } = makeContext({ embedder });
+    try {
+      const result = await runSemanticSearch(context, "prana", {
+        limit: 5,
+        window: 200,
+        // Serves only document 1; document 2 is unfetchable.
+        loadDocuments: async () => new Map([[1, DOCUMENTS[0]]]),
+      });
+      assert.equal(result.filtered_out, 1);
+      assert.deepEqual(result.filtered_out_reasons, {
+        document_unavailable: 1,
+        metadata_filter: 0,
+      });
+    } finally {
+      index.close();
+    }
+  });
+
+  test("nothing filtered out means no reasons block at all", async () => {
+    const embedder = new StubEmbedder(1);
+    const { context, index, documents } = makeContext({ embedder });
+    try {
+      const result = await runSemanticSearch(context, "prana", {
+        limit: 5,
+        window: 200,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+      });
+      assert.equal(result.filtered_out, 0);
+      assert.equal(result.filtered_out_reasons, undefined);
+    } finally {
+      index.close();
+    }
+  });
+});
+
 describe("buildDocumentFilter", () => {
   test("no arguments means no predicate at all", () => {
     assert.equal(buildDocumentFilter({}), undefined);
@@ -417,6 +612,45 @@ describe("buildDocumentFilter", () => {
     assert.equal(byTag(DOCUMENTS[1]), true);
   });
 
+  test("filters by storage_path, which used to be advertised and ignored", () => {
+    // THE DEFECT: `storage_path` was in FILTER_SHAPE (so the model was told it
+    // worked) and absent from this predicate (so it did nothing). A caller got
+    // unfiltered results with no error, no warning and no way to notice, which
+    // is worse than not offering the filter at all -- the schema is a promise.
+    const filter = buildDocumentFilter({ storage_path: 2 })!;
+    assert.ok(filter, "a storage_path argument must produce a predicate at all");
+    assert.equal(filter(DOCUMENTS[0]), false, "document 1 is filed under path 1");
+    assert.equal(filter(DOCUMENTS[1]), true, "document 2 is filed under path 2");
+  });
+
+  test("an unfiled document can never match a storage_path filter", () => {
+    // storage_path === null is the common case on the live corpus, and null must
+    // not coerce into matching 0 or into being skipped.
+    const unfiled: VisibleDocument = { ...DOCUMENTS[0], id: 9, storage_path: null };
+    const filter = buildDocumentFilter({ storage_path: 1 })!;
+    assert.equal(filter(unfiled), false);
+  });
+
+  test("every advertised filter key is honoured", () => {
+    // The schema-vs-implementation comparison, as an assertion rather than a
+    // comment: each key in FILTER_SHAPE, set to a value that must EXCLUDE
+    // document 1, has to actually exclude it. A key that returns the document
+    // unchanged is the `storage_path` bug.
+    const probes: Array<[string, Parameters<typeof buildDocumentFilter>[0]]> = [
+      ["correspondent", { correspondent: 99 }],
+      ["document_type", { document_type: 99 }],
+      ["tag", { tag: 99 }],
+      ["storage_path", { storage_path: 99 }],
+      ["created__date__gte", { created__date__gte: "2999-01-01" }],
+      ["created__date__lte", { created__date__lte: "1999-01-01" }],
+    ];
+    for (const [name, args] of probes) {
+      const filter = buildDocumentFilter(args);
+      assert.ok(filter, `${name} produced no predicate — it is advertised but unimplemented`);
+      assert.equal(filter(DOCUMENTS[0]), false, `${name} did not exclude a non-matching document`);
+    }
+  });
+
   test("filters by created date bounds inclusively", () => {
     const filter = buildDocumentFilter({
       created__date__gte: "2026-10-15",
@@ -424,6 +658,129 @@ describe("buildDocumentFilter", () => {
     })!;
     assert.equal(filter(DOCUMENTS[0]), false);
     assert.equal(filter(DOCUMENTS[1]), true);
+  });
+});
+
+/**
+ * THE ORDERING GUARANTEE FOR `force: true`, driven through the real tool.
+ *
+ * The old order was delete -> run -> throw on outage: a transient embedder blip
+ * destroyed a working index and then reported the outage, leaving nothing on a
+ * rebuild that takes ~58 minutes. The fix is probe-before-delete, and the only
+ * honest way to test ORDERING is to observe which side effect happened before
+ * the failure -- hence the two-way assertion below rather than a single
+ * "it threw" check.
+ */
+describe("sync_embeddings force:true — probe before delete", () => {
+  /** A server whose context holds a stub embedder and a seeded index. */
+  async function forceServer(opts: { embedderFails: boolean }) {
+    const indexDir = tempIndexPath();
+    mkdirSync(indexDir, { recursive: true });
+    const config: SearchConfig = {
+      embeddingUrl: "http://127.0.0.1:11434",
+      model: "stub-embed",
+      prefixMode: "none",
+      indexDir,
+      maxChunks: 4000,
+      syncBatchSize: 16,
+      syncIntervalMs: 0,
+    };
+    const embedder = new StubEmbedder(1);
+    if (opts.embedderFails) {
+      embedder.failWith = new EmbeddingUnavailableError("ollama is down");
+    }
+    const context = new SearchContext(config, () => embedder);
+
+    // Seed two documents so a delete is observable as a count change.
+    const store = context.index();
+    store.writeMeta({
+      schemaVersion: SCHEMA_VERSION,
+      dimensions: EMBEDDING_DIMENSIONS,
+      model: "stub-embed",
+      prefixMode: "none",
+    });
+    for (const doc of DOCUMENTS) {
+      store.replaceDocument(
+        {
+          id: doc.id,
+          modified: "2026-11-15T00:00:00Z",
+          title: doc.title,
+          chunkCount: 2,
+          truncated: false,
+          metadataAt: "2026-11-15T00:00:00Z",
+        },
+        [
+          { kind: "metadata", text: `Title: ${doc.title}.`, embedding: axisVector(1) },
+          { kind: "content", text: doc.content ?? "", embedding: axisVector(doc.id) },
+        ]
+      );
+    }
+
+    // An API that fails LOUDLY on the first sync request, so reaching the sync
+    // is distinguishable from refusing before it.
+    const api = {
+      async request(): Promise<never> {
+        throw new Error("API_REACHED");
+      },
+    } as unknown as PaperlessAPI;
+
+    const server = createMcpServer({
+      baseUrl: "http://paperless.test",
+      token: "test-token",
+      version: "0.0.0-test",
+      publicUrl: "http://paperless.test",
+    });
+    registerSearchTools(server, api, context);
+    return { server, store, embedder };
+  }
+
+  async function callSync(server: ReturnType<typeof createMcpServer>) {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "force-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      return await client.callTool({ name: "sync_embeddings", arguments: { force: true } });
+    } finally {
+      await client.close();
+    }
+  }
+
+  test("embedder down + force:true leaves the index UNCHANGED", async () => {
+    const { server, store } = await forceServer({ embedderFails: true });
+    try {
+      const before = store.counts().documents;
+      assert.equal(before, 2, "the fixture must start with a populated index");
+
+      const result = (await callSync(server)) as { isError?: boolean; content: unknown[] };
+      assert.equal(result.isError, true, "a dead embedder must refuse, not proceed");
+      assert.match(JSON.stringify(result.content), /ollama is down/);
+
+      // THE ASSERTION THAT MAKES THE ORDERING REAL: the index is untouched.
+      assert.equal(
+        store.counts().documents,
+        before,
+        "force:true destroyed the index before discovering the embedder was down"
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  test("embedder up + force:true DOES delete before the sync runs", async () => {
+    // The other half of the ordering claim. With a working embedder the probe
+    // passes, the delete executes, and the failure then comes from the API --
+    // so the counts are zero and the error names the API, not the embedder.
+    const { server, store } = await forceServer({ embedderFails: false });
+    try {
+      assert.equal(store.counts().documents, 2);
+      const result = (await callSync(server)) as { isError?: boolean; content: unknown[] };
+      assert.equal(result.isError, true);
+      // The failure is the API's, proving the probe was passed and the delete ran.
+      assert.match(JSON.stringify(result.content), /API_REACHED/);
+      assert.equal(store.counts().documents, 0, "force:true must have deleted the index");
+    } finally {
+      store.close();
+    }
   });
 });
 

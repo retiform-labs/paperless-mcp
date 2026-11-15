@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { PaperlessAPI } from "../api/PaperlessAPI";
-import { EMBEDDING_DIMENSIONS, SearchIndex } from "./store";
+import { EMBEDDING_DIMENSIONS, SCHEMA_VERSION, SearchIndex } from "./store";
 import { EmbeddingUnavailableError, type Embedder } from "./embedder";
 import {
   DOCUMENT_LIST_PATH,
@@ -203,6 +203,72 @@ describe("pathAfterApi", () => {
       pathAfterApi("http://paperless.test/documents/?page=2"),
       "/documents/?page=2"
     );
+  });
+});
+
+describe("IndexSync — the index's identity is written BY THE RUN", () => {
+  /**
+   * These two tests exist because `writeMeta` and `assertSchemaCompatible` were
+   * BOTH dead code: zero production call sites for either.
+   *
+   * The suite stayed green anyway, because every fixture called `writeMeta`
+   * itself in `openIndex()`. That is the exact defect shape the brief named --
+   * the tool asserted the FUNCTION while nothing asserted the WIRING, so
+   * `embedding_status` could report `dimensions: 0, model: "", prefix_mode: ""`
+   * on a real index and no test could see it.
+   *
+   * ⚠️ These tests therefore build the index WITHOUT calling writeMeta, and read
+   * the result back. A fixture that writes the metadata itself cannot fail.
+   */
+  test("sync.run() writes the embedder's real model, prefix and dimensions", async () => {
+    const api = new FakeApi();
+    api.add({ id: 1 });
+    // A deliberately non-default model and prefix, so a hard-coded value in the
+    // implementation would show up rather than coincidentally matching.
+    const embedder = new StubEmbedder();
+    (embedder as unknown as { model: string }).model = "nomic-embed-text-v1.5";
+    (embedder as unknown as { prefixMode: string }).prefixMode = "nomic";
+
+    const index = new SearchIndex(tempIndexPath());
+    index.open();
+    // NOTHING writes metadata here. This is the whole point.
+    assert.equal(index.meta(), undefined, "the index must start with no metadata");
+
+    try {
+      await makeSync({ api, index, embedder }).run();
+      const meta = index.meta();
+      assert.ok(meta, "sync.run() must have written the index metadata");
+      assert.equal(meta.model, "nomic-embed-text-v1.5");
+      assert.equal(meta.prefixMode, "nomic");
+      assert.equal(meta.dimensions, EMBEDDING_DIMENSIONS);
+      assert.equal(meta.schemaVersion, SCHEMA_VERSION);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("a run that fails to embed still records no false identity", async () => {
+    // The metadata must not claim a model whose vectors were never written. A
+    // write-first ordering means the identity is present even on a failed run,
+    // and that is deliberate: the index exists, and what it says about itself
+    // must be the truth about what this build would write.
+    const api = new FakeApi();
+    api.add({ id: 1 });
+    const embedder = new StubEmbedder();
+    embedder.failWith = new EmbeddingUnavailableError("ollama is down");
+
+    const index = new SearchIndex(tempIndexPath());
+    index.open();
+    try {
+      await assert.rejects(() => makeSync({ api, index, embedder }).run());
+      const meta = index.meta();
+      assert.ok(meta, "the identity is written before the work, so it survives a failure");
+      assert.equal(meta.model, "stub-embed");
+      // And no vectors were written under a claim the run could not honour.
+      assert.equal(index.counts().documents, 0);
+    } finally {
+      index.close();
+    }
   });
 });
 

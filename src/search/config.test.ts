@@ -12,6 +12,8 @@ import {
   expandHome,
   indexPath,
   searchConfig,
+  CHUNK_ROWID_STRIDE,
+  MAX_CHUNKS_LIMIT,
 } from "./config";
 
 describe("searchConfig", () => {
@@ -82,10 +84,33 @@ describe("searchConfig", () => {
   });
 
   test("rejects a chunk bound of zero", () => {
+    // The INTENT of this test is unchanged: zero is a mistake, not a ceiling,
+    // and clamping it would hide it. Only the upper number in the message moved,
+    // because 100000 was itself the bug -- the rowid stride is 8192, so 8191 is
+    // the largest chunk count the store can encode. The old number was a
+    // promise config could not keep: it accepted a value that `chunkRowid`
+    // would only reject hours into a build, on document two thousand.
     assert.throws(
       () => searchConfig({ PAPERLESS_MCP_MAX_CHUNKS: "0" }),
-      /must be between 1 and 100000/
+      /must be between 1 and 8191/
     );
+  });
+
+  test("clamps an over-large chunk bound to what the stride can encode", () => {
+    // Above the ceiling is a CAPABILITY question, not a mistake: the caller
+    // asked for more chunks than the index can address, which means "as many as
+    // possible". It must clamp rather than throw, and it must clamp to the
+    // stride-derived bound rather than to a second literal.
+    const config = searchConfig({ PAPERLESS_MCP_MAX_CHUNKS: "100000" });
+    assert.equal(config?.maxChunks, MAX_CHUNKS_LIMIT);
+    assert.equal(config?.maxChunks, CHUNK_ROWID_STRIDE - 1);
+  });
+
+  test("a chunk bound inside the encodable range is taken as given", () => {
+    // The clamp must not swallow ordinary values: only the above-ceiling case
+    // is a ceiling rather than a mistake.
+    const config = searchConfig({ PAPERLESS_MCP_MAX_CHUNKS: "4000" });
+    assert.equal(config?.maxChunks, 4000);
   });
 
   test("accepts a sync interval of exactly zero as an explicit off switch", () => {

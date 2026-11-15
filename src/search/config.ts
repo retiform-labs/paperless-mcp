@@ -33,6 +33,26 @@ export interface SearchConfig {
   readonly syncIntervalMs: number;
 }
 
+/**
+ * Rowid stride for the vector index: a chunk's rowid is
+ * `docId * CHUNK_ROWID_STRIDE + position`, so a document can hold at most
+ * `CHUNK_ROWID_STRIDE - 1` chunks before two documents collide.
+ *
+ * It lives in config.ts rather than store.ts so the CONFIG derives its own
+ * upper bound from the one number the store actually encodes with. A second
+ * literal would be a second source of truth, and the cost of the two
+ * disagreeing is paid mid-build: `PAPERLESS_MCP_MAX_CHUNKS=100000` was accepted
+ * by config and could only ever be rejected by `chunkRowid`, on document 2,000
+ * of a 58-minute run.
+ *
+ * A power of two, so a position decodes with a mask rather than a division that
+ * has to be exactly right.
+ */
+export const CHUNK_ROWID_STRIDE = 8192;
+
+/** The largest chunk count the stride can encode: positions 0 .. stride-1. */
+export const MAX_CHUNKS_LIMIT = CHUNK_ROWID_STRIDE - 1;
+
 export const DEFAULT_EMBEDDING_URL = "http://127.0.0.1:11434";
 export const DEFAULT_EMBEDDING_MODEL = "nomic-embed-text";
 export const DEFAULT_PREFIX_MODE: PrefixMode = "nomic";
@@ -82,6 +102,15 @@ interface NumberBounds {
   min: number;
   max: number;
   integer: boolean;
+  /**
+   * Clamp a value above `max` down to `max` instead of refusing it.
+   *
+   * Set for bounds that express a CAPABILITY rather than a preference. A caller
+   * asking for more chunks than the index can encode is asking for the most it
+   * can have, not making a mistake worth failing a build over; whereas a value
+   * BELOW `min` (0, negative) is a mistake that clamping would hide.
+   */
+  clampMax?: boolean;
 }
 
 function toNumber(where: string, raw: string, bounds: NumberBounds): number {
@@ -92,11 +121,14 @@ function toNumber(where: string, raw: string, bounds: NumberBounds): number {
   if (bounds.integer && !Number.isInteger(parsed)) {
     throw new Error(`${where} must be a whole number, not "${raw}".`);
   }
-  if (parsed < bounds.min || parsed > bounds.max) {
+  if (parsed < bounds.min || (!bounds.clampMax && parsed > bounds.max)) {
     throw new Error(
       `${where} must be between ${bounds.min} and ${bounds.max}, not "${raw}".`
     );
   }
+  // Above the ceiling with clamping permitted: the caller asked for more than
+  // the store can encode, which is a ceiling rather than an error.
+  if (parsed > bounds.max) return bounds.max;
   return parsed;
 }
 
@@ -155,7 +187,12 @@ export function searchConfig(
       : DEFAULT_PREFIX_MODE,
     indexDir: expandHome(indexDir?.value ?? defaultIndexDir()),
     maxChunks: maxChunks
-      ? toNumber(maxChunks.name, maxChunks.value, { min: 1, max: 100000, integer: true })
+      ? toNumber(maxChunks.name, maxChunks.value, {
+          min: 1,
+          max: MAX_CHUNKS_LIMIT,
+          integer: true,
+          clampMax: true,
+        })
       : DEFAULT_MAX_CHUNKS,
     syncBatchSize: syncBatchSize
       ? toNumber(syncBatchSize.name, syncBatchSize.value, { min: 1, max: 256, integer: true })

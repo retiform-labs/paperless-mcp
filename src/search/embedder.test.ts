@@ -19,6 +19,8 @@ interface CapturedRequest {
   url: string;
   body: { model: string; input: string[] };
   headers: Record<string, string>;
+  /** The fetch init, so a test can assert on transport options like redirect. */
+  init: RequestInit;
 }
 
 function stubFetch(
@@ -31,6 +33,7 @@ function stubFetch(
       url: String(url),
       body: JSON.parse(String(init?.body ?? "{}")),
       headers,
+      init: init ?? {},
     };
     captured.push(request);
     const result = respond(request);
@@ -300,6 +303,88 @@ describe("transport failures", () => {
       prefixMode: "nomic",
     });
     await assert.rejects(() => embedder.embedQuery("x"), /status 500/);
+  });
+
+  test("a redirect is refused rather than followed — the local-only guard's request-time half", async () => {
+    // The gate validates the endpoint ONCE, in the constructor. Without
+    // `redirect: "error"`, a 307 from the local endpoint would forward the body
+    // -- restricted document text -- to whatever host the redirect names, and
+    // the gate would still read as satisfied. So the assertion is on the
+    // transport option itself, not on a status code: the failure has to happen
+    // BEFORE the request is forwarded, which means it must be fetch that
+    // refuses, and undici refuses when told to.
+    let followedTo: string | undefined;
+    const captured: CapturedRequest[] = [];
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      captured.push({
+        url: String(url),
+        body: JSON.parse(String(init?.body ?? "{}")),
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        init: init ?? {},
+      });
+      // Emulate undici: it only follows when the option permits it.
+      if (init?.redirect !== "error") {
+        followedTo = "http://attacker.example/collect";
+      }
+      return new Response("moved", {
+        status: 307,
+        headers: { Location: "http://attacker.example/collect" },
+      });
+    }) as unknown as typeof fetch;
+
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "nomic",
+    });
+
+    // The option must be present, on the one outbound fetch.
+    assert.equal(captured.length, 0);
+    await assert.rejects(
+      () => embedder.embedQuery("confidential sample text"),
+      (err: unknown) => {
+        assert.ok(err instanceof EmbeddingUnavailableError);
+        assert.match(String(err), /307/);
+        return true;
+      }
+    );
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].init.redirect, "error");
+    // The proof that the body was NOT forwarded.
+    assert.equal(followedTo, undefined);
+  });
+
+  test("probe() exercises a real embedding, not a bare GET", async () => {
+    // A probe that only pings the server's root would pass against an Ollama
+    // that is up with the model un-pulled, and then fail on the first real
+    // request -- after `force:true` has already deleted the index. So the probe
+    // must hit the same endpoint with the same model as the real work.
+    const captured = stubFetch(() => ({ body: { embeddings: [vectorOfWidth(768)] } }));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "nomic",
+    });
+    await embedder.probe();
+    assert.equal(captured.length, 1);
+    assert.match(captured[0].url, /\/api\/embed/);
+    assert.equal(captured[0].body.model, "nomic-embed-text");
+    // A constant, never document text: a liveness check must not put restricted
+    // material on the wire. Sent UNPREFIXED deliberately -- the probe asks "will
+    // this model embed at all", and a model that fails only on a prefix is not
+    // a failure mode anyone has observed. The prefix is validated at build time
+    // by the metadata assertion, not by the liveness probe.
+    assert.deepEqual(captured[0].body.input, ["ping"]);
+  });
+
+  test("probe() rejects when the model is not pulled, even though the server is up", async () => {
+    stubFetch(() => ({ status: 404, body: { error: "model not found" } }));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "nomic",
+    });
+    await assert.rejects(() => embedder.probe(), EmbeddingUnavailableError);
   });
 
   test("a mismatched embeddings count is refused rather than truncated", async () => {

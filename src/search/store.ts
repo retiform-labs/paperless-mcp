@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import { load as loadVecExtension } from "sqlite-vec";
-import { PrefixMode } from "./config";
+import { CHUNK_ROWID_STRIDE, PrefixMode } from "./config";
 import { assertPrefixModeMatches } from "./embedder";
 
 /**
@@ -78,13 +78,37 @@ export const SCHEMA_VERSION = 1;
 export const EMBEDDING_DIMENSIONS = 768;
 
 /**
- * Rowid stride. Must exceed MAX_CHUNKS, and must be a power of two so the
- * position decodes with a mask. 8192 leaves room for MaxChunks up to 8191.
+ * Rowid stride, re-exported from ./config where it is DECLARED.
+ *
+ * It moved so the configuration could derive `MAX_CHUNKS`'s upper bound from
+ * the same number the store encodes with, instead of hard-coding 100000 and
+ * deferring the contradiction to `chunkRowid` mid-build. The re-export keeps
+ * every existing `import { CHUNK_ROWID_STRIDE } from "./store"` call site
+ * working against the single declaration.
  */
-export const CHUNK_ROWID_STRIDE = 8192;
+export { CHUNK_ROWID_STRIDE };
 
 /** Whether FTS5 is compiled into the bundled SQLite. Measured, not assumed. */
 export const HAS_FTS5 = detectFts5();
+
+/**
+ * The hard ceiling on kNN candidates for one query.
+ *
+ * It is **4096 because sqlite-vec refuses more**, not because that is a good
+ * number: `k value in knn query too large, provided 6400 and the limit is 4096`
+ * is the measured error, and it fires as a hard SQLITE_ERROR rather than
+ * clamping silently. Discovered by writing this widening loop against a ceiling
+ * of 20,000 and watching eleven previously-green tests fail -- which is the
+ * argument for keeping the number here, derived from the constraint, rather
+ * than somewhere in the widening logic.
+ *
+ * ⚠️ THE CONSEQUENCE, stated because it is a real limit on defect 5's fix: with
+ * a 4,000-chunk document occupying the top of the ranking, a query can find at
+ * most `4096 - 4000 + 1 = 97` distinct documents no matter how far it widens.
+ * That is far more than any caller's `limit` (MAX_LIMIT is 50), so the widening
+ * does its job; but it is a ceiling, not an absence of one.
+ */
+export const VECTOR_CANDIDATE_CEILING = 4096;
 
 function detectFts5(): boolean {
   const probe = new Database(":memory:");
@@ -277,9 +301,36 @@ export class SearchIndex {
 
   constructor(
     private readonly path: string,
-    private readonly options: { readonly?: boolean; fts5?: boolean } = {}
+    private readonly options: {
+      readonly?: boolean;
+      fts5?: boolean;
+      /**
+       * What this process believes the index should be. When supplied, `open()`
+       * asserts the stored index agrees and THROWS on a mismatch.
+       *
+       * Supplied by the query path. The assertion has to live on the open path
+       * because that is the one place every reader passes through: `writeMeta`
+       * and `assertSchemaCompatible` were both dead in production, so an index
+       * built with `e5` and queried with `nomic` returned silently worse
+       * results while the KDoc claimed the mismatch "must be refused loudly".
+       */
+      expected?: { dimensions?: number; model?: string; prefixMode?: PrefixMode };
+    } = {}
   ) {
     this.hasFts5 = options.fts5 ?? HAS_FTS5;
+  }
+
+  /**
+   * Whether the lexical half can actually run in this build.
+   *
+   * Exposed because the caller's "is anything searchable at all" question is a
+   * question about CAPABILITY, not about whether a list came back empty. Those
+   * are different facts and conflating them produced a false statement of
+   * mechanism: a legitimate no-match with FTS5 present was reported as
+   * "no lexical fallback exists".
+   */
+  get lexicalAvailable(): boolean {
+    return this.hasFts5;
   }
 
   get isOpen(): boolean {
@@ -320,7 +371,42 @@ export class SearchIndex {
     }
     if (!this.options.readonly) this.migrate(db);
     this.db = db;
+    if (this.options.expected) {
+      try {
+        // A FRESH index has no metadata and must stay openable: that is the
+        // first build, and refusing it would make `sync_embeddings` unable to
+        // create the thing it exists to create. `assertSchemaCompatible` is
+        // only meaningful once there is a stored index to disagree with.
+        if (this.hasMetaRows(db)) this.assertSchemaCompatible(this.options.expected);
+      } catch (err) {
+        // Close the handle we just opened before propagating: a mismatch must
+        // not leave a live connection to an index this process refuses to use.
+        this.db = undefined;
+        db.close();
+        throw err;
+      }
+    }
     return db;
+  }
+
+  /**
+   * Whether the index has ever been BUILT — i.e. carries metadata ROWS.
+   *
+   * Not "does the table exist": `migrate()` creates the table on every open, so
+   * a table check is true on a brand-new index and would make
+   * `assertSchemaCompatible` throw "no metadata, build it first" on the very
+   * run that exists to build it. The distinction that matters is rows, because
+   * rows mean vectors with a stated provenance.
+   */
+  private hasMetaRows(db: Database.Database): boolean {
+    const row = db
+      .prepare(
+        "SELECT count(*) AS c FROM sqlite_master WHERE type = 'table' AND name = 'index_meta'"
+      )
+      .get() as { c: number };
+    if (row.c === 0) return false;
+    const rows = db.prepare("SELECT count(*) AS c FROM index_meta").get() as { c: number };
+    return rows.c > 0;
   }
 
   close(): void {
@@ -582,14 +668,22 @@ export class SearchIndex {
       ? db.prepare("DELETE FROM fts WHERE rowid = CAST(? AS INTEGER)")
       : undefined;
 
+    const countVec = db.prepare(
+      "SELECT count(*) AS c FROM vec_chunks WHERE rowid = CAST(? AS INTEGER)"
+    );
+
     const run = db.transaction(() => {
-      const del = db
-        .prepare("DELETE FROM vec_chunks WHERE rowid = CAST(? AS INTEGER)")
-        .run(rowid);
-      // Not asserted against a chunk count here: a fresh document may not yet
-      // have position 0 in the vector table, and that is legitimate. What is
-      // asserted is that the DELETE and the re-INSERT leave exactly one row.
-      void del;
+      // The DELETE's own row count is NOT asserted: a fresh document may not yet
+      // have position 0 in the vector table, and `changes: 0` is legitimate
+      // then. What IS asserted is the post-condition -- exactly one vector row
+      // for this document's metadata chunk after the delete-then-insert.
+      //
+      // This assertion is the comment that used to sit here, made real. The
+      // comment claimed it and the code said `void del`, which is the
+      // comment-vs-code lie class: a reader trusts a guarantee that has no
+      // enforcement, and the failure it describes (a duplicated vector row
+      // making one document score twice) has no other detector.
+      db.prepare("DELETE FROM vec_chunks WHERE rowid = CAST(? AS INTEGER)").run(rowid);
       // The lexical index needs the same delete-then-insert. Without it the OLD
       // metadata text stays in `fts` forever and remains searchable alongside
       // the new text, so one document matches two contradictory strings.
@@ -599,6 +693,15 @@ export class SearchIndex {
       insertVec.run(rowid, toBlob(chunk.embedding));
       insertFts?.run(rowid, chunk.text);
       update.run(metadataAt, docId);
+      const after = (countVec.get(rowid) as { c: number }).c;
+      if (after !== 1) {
+        // Thrown inside the transaction, so the whole replace rolls back: a
+        // document whose metadata vector is duplicated is better left with its
+        // previous metadata than with two contradictory ones.
+        throw new Error(
+          `replaceMetadata left ${after} vector rows for document ${docId}; expected exactly 1.`
+        );
+      }
     });
     run();
   }
@@ -673,10 +776,36 @@ export class SearchIndex {
   vectorHits(embedding: number[], limit: number): Hit[] {
     const db = this.handle();
     if (limit <= 0) return [];
-    // Over-fetch so one document cannot monopolise the candidate set. The
-    // multiplier is on top of `limit` rather than a fixed constant, because at
-    // limit 3 a fixed 1100 would be pure waste and at limit 100 too little.
-    const candidates = Math.max(limit * 20, 200);
+    // A FIXED over-fetch is not enough, and the reason is arithmetic rather
+    // than a matter of degree. This store returns one hit per document, so `k`
+    // candidates containing D distinct documents can only ever yield D results.
+    // With `max(limit*20, 200)` and a 4,000-chunk document, a caller asking for
+    // 10 got **1** -- all 200 (or 800) nearest rows belonged to that document,
+    // measured against a corpus of 60 documents. The live corpus has 21
+    // documents over 2M chars, so this is a real scale risk, not a corner case.
+    //
+    // So the budget WIDENS until either `limit` distinct documents are in hand
+    // or the pool is exhausted. Doubling keeps the number of round trips
+    // logarithmic in the worst case, and VECTOR_CANDIDATE_CEILING bounds it so
+    // a corpus with one enormous document cannot make a query unbounded.
+    // Clamped from the start: `limit * 20` at MAX_LIMIT 50 is 1000, but a
+    // caller is not the only input -- `runSemanticSearch` multiplies by 4
+    // before it gets here, so an unclamped initial value could already exceed
+    // sqlite-vec's k cap before the widening loop ran once.
+    let candidates = Math.min(Math.max(limit * 20, 200), VECTOR_CANDIDATE_CEILING);
+    let hits: Hit[] = [];
+    for (;;) {
+      hits = this.vectorHitsAt(embedding, candidates, limit);
+      // `hits.length` is a count of DISTINCT documents (per-document dedupe),
+      // so this compares the right quantity against the right target.
+      if (hits.length >= limit || candidates >= VECTOR_CANDIDATE_CEILING) return hits;
+      candidates = Math.min(candidates * 2, VECTOR_CANDIDATE_CEILING);
+    }
+  }
+
+  /** One kNN round trip at a given candidate budget. */
+  private vectorHitsAt(embedding: number[], candidates: number, limit: number): Hit[] {
+    const db = this.handle();
     const sql = `
       WITH nearest AS (
         SELECT rowid, distance

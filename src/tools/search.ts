@@ -40,7 +40,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { PaperlessAPI } from "../api/PaperlessAPI";
 import { searchConfig, indexPath, type SearchConfig } from "../search/config";
 import { OllamaEmbedder, EmbeddingUnavailableError, type Embedder } from "../search/embedder";
-import { SearchIndex, LexicalUnavailableError, type Hit } from "../search/store";
+import {
+  EMBEDDING_DIMENSIONS,
+  SearchIndex,
+  LexicalUnavailableError,
+  type Hit,
+} from "../search/store";
 import { fuse, type Fused } from "../search/rank";
 import { IndexSync, type SyncReport } from "../search/sync";
 import { withErrorHandling } from "./utils/middlewares";
@@ -57,11 +62,31 @@ export const MAX_LIMIT = 50;
  * The filter arguments, mirroring `search_passages`.
  *
  * Kept in one object so the two tools cannot drift: if search_passages gains a
- * filter, this is the one place that has to learn it. They are applied in JS
- * against the chunk's document id rather than pushed into the kNN statement,
- * because the store returns one hit per document and a filter that removed a
- * document after the fact would silently shrink the result set below `limit`
- * with no way for the caller to know the ranking had been trimmed.
+ * filter, this is the one place that has to learn it.
+ *
+ * ── WHERE THEY ARE APPLIED, AND WHAT THAT COSTS ────────────────────────────
+ * They are evaluated in JS against each hit's fetched document, NOT pushed into
+ * the kNN statement. That is a deliberate trade with a known cost, stated here
+ * because the previous comment argued against this approach while describing
+ * it as the approach:
+ *
+ *   PRO  The store's kNN returns one hit per document, and the documents are
+ *        fetched anyway to build passages, so the filter is free at the point
+ *        it is needed and needs no new SQL.
+ *   CON  `rowid IN (…)` is NOT composed into the MATCH statement, so the
+ *        filtered set can come back SHORT of `limit` with no signal that
+ *        ranking was trimmed. This is why `filtered_out` and its reason
+ *        breakdown exist: the shortfall is reported rather than hidden.
+ *
+ * Pushing the filter into the kNN would remove the CON, at the cost of a
+ * per-query SQL shape and of needing each filter to be expressible as a set of
+ * document ids before the query runs. That is the right eventual design; it is
+ * not this change.
+ *
+ * ⚠️ EVERY KEY HERE MUST BE HONOURED BY `buildDocumentFilter`. A key that is
+ * advertised to the model and silently ignored is worse than an absent one: the
+ * caller gets unfiltered results with no error, no warning, and no way to
+ * notice. `storage_path` was exactly that until it was implemented.
  */
 const FILTER_SHAPE = {
   correspondent: z.number().optional(),
@@ -78,6 +103,15 @@ export interface VisibleDocument {
   content: string | null;
   correspondent: number | null;
   document_type: number | null;
+  /**
+   * Paperless' storage path id, or null when the document is unfiled.
+   *
+   * Nullable because most documents are: on the live corpus it is the exception
+   * rather than the rule. It is typed `number | null` rather than optional
+   * because `undefined` (field absent) and `null` (explicitly unfiled) filter
+   * differently, and `/api/documents/{id}/` always returns the key.
+   */
+  storage_path: number | null;
   tags: number[];
   created: string;
 }
@@ -98,7 +132,41 @@ export interface SemanticSearchResult {
   semantic: "ok" | "unavailable";
   degraded_reason?: string;
   strong_match: boolean;
+  /** Pre-filter: how many DISTINCT documents the retrievers returned. */
   total_hits: number;
+  /**
+   * Post-filter: how many of `total_hits` were dropped before becoming
+   * passages.
+   *
+   * Exists because `total_hits: 12, passages: []` was previously a legal and
+   * completely unexplained response. A caller had no way to tell "everything
+   * was filtered out by your own filter arguments" from "the ranking found 12
+   * documents and every one has since vanished".
+   */
+  filtered_out: number;
+  /**
+   * Why they were dropped, as counts. Absent when nothing was dropped.
+   *
+   * Split by cause because the two are actionable in different ways: a
+   * missing document means Paperless would not serve an id the index holds
+   * (deleted mid-flight, permissions), whereas a metadata-filter rejection
+   * means the arguments the caller passed did their job.
+   */
+  filtered_out_reasons?: {
+    document_unavailable: number;
+    metadata_filter: number;
+  };
+  /**
+   * Which retrievers actually RAN, versus which merely returned nothing.
+   *
+   * This is the field that makes the three degradation states legible. An
+   * empty `passages` with `retrievers: ["vector", "lexical"]` is the honest
+   * answer "both searched and neither matched"; with `["lexical"]` it means
+   * only one half could run. Absence of this field would leave the caller
+   * inferring capability from a list length, which is how the old guard came
+   * to assert a mechanism that had not happened.
+   */
+  retrievers: Array<"vector" | "lexical">;
   passages: SemanticPassage[];
 }
 
@@ -218,7 +286,18 @@ export class SearchContext {
           "and the other PAPERLESS_MCP_* search variables to enable it."
       );
     }
-    const store = new SearchIndex(indexPath(config));
+    // `expected` is what makes the deployment policy-adjacent schema guard REAL at query
+    // time. Without it, an index built with `e5` and queried with `nomic`
+    // returned `semantic: "ok"` and quietly worse results, while
+    // `assertPrefixModeMatches`'s own KDoc said the mismatch "must be refused
+    // loudly". Same for a same-width model swap and a bumped schema_version.
+    const store = new SearchIndex(indexPath(config), {
+      expected: {
+        dimensions: EMBEDDING_DIMENSIONS,
+        model: config.model,
+        prefixMode: config.prefixMode,
+      },
+    });
     try {
       store.open();
     } catch (err) {
@@ -302,50 +381,93 @@ export async function runSemanticSearch(
   const terms = queryTerms(query);
 
   let semantic: SemanticSearchResult["semantic"] = "ok";
-  let degradedReason: string | undefined;
+  const reasons: string[] = [];
   let vector: Hit[] = [];
   let text: Hit[] = [];
 
-  // The lexical half needs no network and no model. It runs unconditionally and
-  // is the reason a degraded call still returns something.
-  try {
-    // Over-fetch for the vector side's sake: the store returns one hit per
-    // document and filters are applied below, so fetching exactly `limit` would
-    // let one filtered-out document empty the result.
-    text = store.textHits(query, limit * 4);
-  } catch (err) {
-    if (!(err instanceof LexicalUnavailableError)) throw err;
-    // No FTS5 in this build. Not an embedding problem, and NOT an empty
-    // result -- `semantic` stays "ok" for the vector side and the reason is
-    // carried so the caller knows the ranking has only one input.
-    degradedReason = `Lexical search is unavailable in this build: ${errorMessage(err)}`;
+  // ⚠️ THE THREE STATES, kept distinct, because collapsing them produced a FALSE
+  // STATEMENT OF MECHANISM. The old guard fired when BOTH lists came back empty
+  // and the embedder was down, and announced "no lexical fallback exists" --
+  // which was untrue whenever FTS5 was present and simply had no match. A
+  // caller then could not tell "nothing in the corpus says zzzznothing" from
+  // "search is broken", which is the exact distinction the degradation contract
+  // exists to preserve.
+  //
+  //   (a) BOTH RAN, NOTHING MATCHED  -> semantic ok|unavailable, empty list,
+  //                                     and a field that says so. ALLOWED.
+  //   (b) LEXICAL RAN, EMBEDDER DOWN -> results + unavailable + the reason.
+  //                                    Allowed; already covered above.
+  //   (c) NEITHER IS CAPABLE         -> refuse with an error. There is
+  //                                    genuinely nothing to search with, and
+  //                                    an empty list would read as "no such
+  //                                    document".
+  //
+  // The predicate for (c) is CAPABILITY, not emptiness: `store.lexicalAvailable`
+  // is a property of the build, and the embedder's absence is a property of the
+  // configuration. Neither can be inferred from a list length.
+
+  // The lexical half needs no network and no model. It runs whenever the build
+  // supports it, and it is the reason a degraded call still returns something.
+  let lexicalCapable = store.lexicalAvailable;
+  if (lexicalCapable) {
+    try {
+      // Over-fetch because filters are applied below: fetching exactly `limit`
+      // would let one filtered-out document empty the result.
+      text = store.textHits(query, limit * 4);
+    } catch (err) {
+      if (!(err instanceof LexicalUnavailableError)) throw err;
+      // The build CLAIMED FTS5 and the query path disagreed. Treat the
+      // capability as false rather than swallowing it: this is the one place
+      // the property could be wrong, and state (c) must not be missed because
+      // of it.
+      lexicalCapable = false;
+      reasons.push(`Lexical search failed despite FTS5 being present: ${errorMessage(err)}`);
+    }
+  } else {
+    reasons.push("Lexical search is unavailable in this build: SQLite has no FTS5 module.");
   }
 
   const embedder = context.embedderOrUndefined();
+  let vectorCapable = false;
   if (!embedder) {
     semantic = "unavailable";
-    degradedReason ??= "The embedding client is not configured.";
+    reasons.push("The embedding client is not configured.");
   } else {
     try {
       const embedding = await embedder.embedQuery(query);
       vector = store.vectorHits(embedding, limit * 4);
+      vectorCapable = true;
     } catch (err) {
       if (!(err instanceof EmbeddingUnavailableError)) throw err;
       // EXPECTED. The lexical list above already holds whatever could be found.
       semantic = "unavailable";
-      degradedReason = errorMessage(err);
+      reasons.push(errorMessage(err));
     }
   }
 
-  // No FTS5 AND no embedder means there is genuinely nothing to search with.
-  // Refuse rather than return an empty list that reads as "no such document".
-  if (text.length === 0 && vector.length === 0 && degradedReason && semantic === "unavailable") {
+  // State (c): neither retriever is capable. Refuse loudly.
+  if (!lexicalCapable && !vectorCapable) {
     throw new Error(
-      `Semantic search is fully unavailable and no lexical fallback exists: ${degradedReason}`
+      `Semantic search is fully unavailable: neither the vector side nor a ` +
+        `lexical fallback can run. ${reasons.join(" ")}`
     );
   }
 
-  let fused: Fused[] = fuse(vector, text);
+  // One reason string, but FIRST-REASON-WINS is now explicit rather than the
+  // `??=` accident it was: `??=` let a lexical-unavailable reason mask a later
+  // embedder reason, so a call with no FTS5 AND a dead embedder reported only
+  // the lexical half and left the reader guessing about the vectors.
+  const degradedReason = reasons.length > 0 ? reasons.join(" ") : undefined;
+
+  const fused: Fused[] = fuse(vector, text);
+
+  // Which retrievers actually RAN. Reported rather than inferred: an empty
+  // result with both here is "both searched and neither matched", with one is
+  // "only that half could run", and the difference is the whole point.
+  const retrievers: Array<"vector" | "lexical"> = [];
+  if (vectorCapable) retrievers.push("vector");
+  if (lexicalCapable) retrievers.push("lexical");
+
   if (fused.length === 0) {
     return {
       query,
@@ -353,6 +475,10 @@ export async function runSemanticSearch(
       ...(degradedReason ? { degraded_reason: degradedReason } : {}),
       strong_match: false,
       total_hits: 0,
+      filtered_out: 0,
+      retrievers,
+      // State (a) on its own terms: nothing matched and the payload says so —
+      // `semantic`, `retrievers`, and an empty list together are unambiguous.
       passages: [],
     };
   }
@@ -363,10 +489,21 @@ export async function runSemanticSearch(
   const documents = await opts.loadDocuments(fused.map((hit) => hit.documentId));
 
   const passages: SemanticPassage[] = [];
+  // Post-fetch accounting. Without it `total_hits: 12, passages: []` was a
+  // legal, unexplained response: the caller could not tell that its own filter
+  // arguments had removed everything.
+  let documentUnavailable = 0;
+  let metadataFiltered = 0;
   for (const hit of fused) {
     const doc = documents.get(hit.documentId);
-    if (!doc) continue;
-    if (opts.filters && !opts.filters(doc)) continue;
+    if (!doc) {
+      documentUnavailable += 1;
+      continue;
+    }
+    if (opts.filters && !opts.filters(doc)) {
+      metadataFiltered += 1;
+      continue;
+    }
     const anchored = buildPassage(doc, terms, opts.window);
     passages.push({
       id: doc.id,
@@ -386,12 +523,22 @@ export async function runSemanticSearch(
       : false;
   });
 
+  // `filtered_out` counts what the loop dropped, NOT `total_hits - passages`
+  // -- those differ when the `limit` break fires with hits still unexamined.
+  // The honest decomposition is: fused = shown + dropped + never-reached.
+  const filteredOut = documentUnavailable + metadataFiltered;
+
   return {
     query,
     semantic,
     ...(degradedReason ? { degraded_reason: degradedReason } : {}),
     strong_match: strong,
     total_hits: fused.length,
+    filtered_out: filteredOut,
+    ...(filteredOut > 0
+      ? { filtered_out_reasons: { document_unavailable: documentUnavailable, metadata_filter: metadataFiltered } }
+      : {}),
+    retrievers,
     passages,
   };
 }
@@ -467,6 +614,25 @@ export function registerSearchTools(
     withErrorHandling(async (args) => {
       const runner = context.syncRunner(api);
       if (args.force) {
+        // ⚠️ PROBE BEFORE DELETE. The old order was delete -> run -> throw on
+        // outage, which turned a transient embedder blip into "you no longer
+        // have an index" on a rebuild that takes ~58 minutes. The failure the
+        // caller can afford is a refusal; the failure it cannot afford is
+        // having destroyed the working index to discover the server is down.
+        //
+        // The probe is a real embedding of a constant string (see
+        // `OllamaEmbedder.probe`), not a GET: a server that is up without its
+        // model pulled answers GET and then fails on the first real request.
+        const embedder = context.embedderOrUndefined();
+        if (embedder) {
+          if (embedder.probe) {
+            await embedder.probe();
+          } else {
+            // A fake without probe(): still exercise the same path the sync
+            // will use, so the ordering guarantee holds for every embedder.
+            await embedder.embedQuery("ping");
+          }
+        }
         // force means "the stored vectors are not trustworthy", which on this
         // schema means deleting the document rows so the diff sees everything
         // as new. Done through deleteDocuments rather than a file unlink so the
@@ -493,13 +659,16 @@ export function buildDocumentFilter(filters: {
   created__date__gte?: string;
   created__date__lte?: string;
 }): ((doc: VisibleDocument) => boolean) | undefined {
-  // storage_path is not on the lightweight document shape this path fetches, so
-  // a caller passing it would otherwise be silently ignored -- the filter is
-  // named here so the omission is a decision rather than an oversight.
+  // Every key in FILTER_SHAPE is honoured here. `storage_path` used to be the
+  // exception: advertised to the model, absent from this predicate, and
+  // therefore silently ignored -- a caller got unfiltered results with no
+  // error, no warning, and no way to notice. That is worse than not offering
+  // the filter at all, because the schema is a promise.
   const active =
     filters.correspondent !== undefined ||
     filters.document_type !== undefined ||
     filters.tag !== undefined ||
+    filters.storage_path !== undefined ||
     filters.created__date__gte !== undefined ||
     filters.created__date__lte !== undefined;
   if (!active) return undefined;
@@ -511,6 +680,11 @@ export function buildDocumentFilter(filters: {
       return false;
     }
     if (filters.tag !== undefined && !doc.tags.includes(filters.tag)) return false;
+    // An unfiled document (storage_path === null) can never match a numeric
+    // storage_path, which is correct: the caller asked for a filing location.
+    if (filters.storage_path !== undefined && doc.storage_path !== filters.storage_path) {
+      return false;
+    }
     if (filters.created__date__gte !== undefined && doc.created < filters.created__date__gte) {
       return false;
     }

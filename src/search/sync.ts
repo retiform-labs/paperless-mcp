@@ -66,7 +66,7 @@
 import { PaperlessAPI } from "../api/PaperlessAPI";
 import { chunkText, metadataText, MAX_CHUNKS } from "./chunk";
 import { EmbeddingUnavailableError, type Embedder } from "./embedder";
-import { SearchIndex, type StoredChunk } from "./store";
+import { SCHEMA_VERSION, SearchIndex, type StoredChunk } from "./store";
 
 /** How often a document's metadata chunk is rebuilt regardless of `modified`. */
 export const METADATA_REFRESH_MS = 24 * 60 * 60 * 1000;
@@ -252,6 +252,26 @@ export class IndexSync {
       failed: 0,
       deletedSkipped: false,
     };
+
+    // ⚠️ THE INDEX'S IDENTITY IS WRITTEN BY THE RUN, NOT BY THE FIXTURE.
+    //
+    // `writeMeta` and `assertSchemaCompatible` both existed and were both dead:
+    // no production call site for either, so `embedding_status` reported
+    // `dimensions: 0, model: "", prefix_mode: ""` on a real index, and a
+    // prefix-mode mismatch could never be refused. The suite stayed green
+    // because the FIXTURES called `writeMeta` themselves -- the tool asserted
+    // the function while nothing asserted the wiring, which is the
+    // no-op-stub-in-a-test-fake family: a contract leg with no observable
+    // output and therefore no test.
+    //
+    // Written FIRST, before any document work, so the index never holds vectors
+    // whose provenance it cannot state. It is also cheap: four upserts.
+    this.store.writeMeta({
+      schemaVersion: SCHEMA_VERSION,
+      dimensions: this.embedder.dimensions,
+      model: this.embedder.model,
+      prefixMode: this.embedder.prefixMode,
+    });
 
     const remote = new Map<number, string>();
     const { rows, count } = await this.listAll<{ id: number; modified: string }>(

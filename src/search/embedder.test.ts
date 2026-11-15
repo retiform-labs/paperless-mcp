@@ -80,10 +80,10 @@ describe("parseEmbeddingEndpoint — always-on hygiene", () => {
       "http://127.0.0.1:11434",
       "http://localhost:11434",
       "http://[::1]:11434",
-      "http://127.0.0.1:11434",
-      "http://192.0.2.10:11434",
+      "http://10.1.2.3:11434",
+      "http://192.168.1.10:11434",
       "http://172.16.0.1:11434",
-      "https://192.0.2.20:11434/v1",
+      "https://192.168.1.20:11434/v1",
     ]) {
       assert.doesNotThrow(() => parseEmbeddingEndpoint(url), url);
     }
@@ -159,8 +159,8 @@ describe("parseEmbeddingEndpoint — the local-only restriction", () => {
 
   test("still accepts loopback and RFC1918 with the flag on", () => {
     for (const url of [
-      "http://127.0.0.1:11434",
-      "http://192.0.2.10:11434",
+      "http://10.1.2.3:11434",
+      "http://192.168.1.10:11434",
       "http://127.0.0.1:11434",
     ]) {
       assert.doesNotThrow(() => parseEmbeddingEndpoint(url, { localOnly: true }), url);

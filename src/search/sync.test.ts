@@ -249,7 +249,7 @@ describe("pathAfterApi", () => {
 
   test("keeps a port in the base out of the result", () => {
     assert.equal(
-      pathAfterApi("http://192.0.2.10:8000/api/tags/?page=3"),
+      pathAfterApi("http://10.1.2.3:8000/api/tags/?page=3"),
       "/tags/?page=3"
     );
   });

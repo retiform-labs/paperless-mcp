@@ -124,6 +124,8 @@ function makeContext(opts: {
     maxChunks: 4000,
     syncBatchSize: 16,
     syncIntervalMs: 0,
+    embeddingLocalOnly: false,
+    embeddingApiKey: undefined,
   };
   // The factory states "no embedder" rather than leaving it unset: unset would
   // be resolved into a REAL Ollama client, and Ollama is listening on this box.
@@ -502,6 +504,8 @@ describe("degradation — the three states are distinguishable", () => {
       maxChunks: 4000,
       syncBatchSize: 16,
       syncIntervalMs: 0,
+      embeddingLocalOnly: false,
+      embeddingApiKey: undefined,
     };
     const context = new SearchContext(config, () => undefined);
     const seed = new SearchIndex(path, { fts5: false });
@@ -684,6 +688,8 @@ describe("sync_embeddings force:true — probe before delete", () => {
       maxChunks: 4000,
       syncBatchSize: 16,
       syncIntervalMs: 0,
+      embeddingLocalOnly: false,
+      embeddingApiKey: undefined,
     };
     const embedder = new StubEmbedder(1);
     if (opts.embedderFails) {
@@ -836,6 +842,203 @@ describe("embeddingStatus", () => {
   });
 });
 
+/**
+ * ── Caller-proving tests ───────────────────────────────────────────────────
+ *
+ * The two blocks below exist because of a specific, recorded defect class: a
+ * setting that is read and range-checked with no consumer reads as a working
+ * feature and is not one. `PAPERLESS_MCP_SYNC_BATCH_SIZE` and
+ * `PAPERLESS_MCP_SYNC_INTERVAL_MS` were both in exactly that state, and
+ * `IndexSync.start()` had no caller anywhere in the tree.
+ *
+ * A test of `start()` proves `start()` works. A test that passes 16 and asserts
+ * 16 proves the default. Neither says anything about whether the configured
+ * value reaches the code that acts on it, which is the only question worth
+ * asking here. So these assert from OUTSIDE the unit: build the real context
+ * from a real config, and observe the effect.
+ */
+
+describe("PAPERLESS_MCP_SYNC_BATCH_SIZE reaches the embedder — the caller exists", () => {
+  const realFetch = globalThis.fetch;
+  after(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  function captureRequests(): { batches: number[] } {
+    const seen = { batches: [] as number[] };
+    globalThis.fetch = (async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { input: string[] };
+      seen.batches.push(body.input.length);
+      return new Response(
+        JSON.stringify({
+          embeddings: body.input.map(() => axisVector(1)),
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }) as typeof fetch;
+    return seen;
+  }
+
+  /** A context with NO embedder factory, so `embedderOrUndefined` builds the
+   *  real client from the config — which is the wiring under test. */
+  function contextWith(batchSize: number): SearchContext {
+    const config: SearchConfig = {
+      embeddingUrl: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "none",
+      indexDir: tempIndexPath(),
+      maxChunks: 4000,
+      syncBatchSize: batchSize,
+      syncIntervalMs: 0,
+      embeddingLocalOnly: false,
+      embeddingApiKey: undefined,
+    };
+    return new SearchContext(config);
+  }
+
+  test("a config batchSize of 3 splits 7 texts into 3+3+1 requests", async () => {
+    const seen = captureRequests();
+    const context = contextWith(3);
+    const embedder = context.embedderOrUndefined();
+    assert.ok(embedder, "the context must build a real embedder from config");
+    const result = await embedder.embedDocuments(
+      Array.from({ length: 7 }, (_, index) => `doc ${index}`)
+    );
+    assert.equal(result.length, 7);
+    // If config.syncBatchSize were not threaded into the constructor, this
+    // reads [7]: the module default is 16, larger than the input.
+    assert.deepEqual(seen.batches, [3, 3, 1]);
+  });
+
+  test("a config batchSize of 2 splits 5 texts into 2+2+1 requests", async () => {
+    // A second non-default number, because one passing case can always be a
+    // coincidence of the fixture.
+    const seen = captureRequests();
+    const context = contextWith(2);
+    const embedder = context.embedderOrUndefined();
+    assert.ok(embedder);
+    await embedder.embedDocuments(["a", "b", "c", "d", "e"]);
+    assert.deepEqual(seen.batches, [2, 2, 1]);
+  });
+});
+
+describe("PAPERLESS_MCP_SYNC_INTERVAL_MS starts a timer — the caller exists", () => {
+  /**
+   * A context whose embedder is a stub and whose store is a temp file.
+   *
+   * The API object throws on every call: the first scheduled run is expected to
+   * fail and be logged rather than take down registration, and making that
+   * explicit here means the test cannot pass by accident on a silent no-op.
+   */
+  function contextWithInterval(intervalMs: number): SearchContext {
+    const config: SearchConfig = {
+      embeddingUrl: "http://127.0.0.1:11434",
+      model: "stub-embed",
+      prefixMode: "none",
+      indexDir: (() => {
+        const d = tempIndexPath();
+        mkdirSync(d, { recursive: true });
+        return d;
+      })(),
+      maxChunks: 4000,
+      syncBatchSize: 16,
+      syncIntervalMs: intervalMs,
+      embeddingLocalOnly: false,
+      embeddingApiKey: undefined,
+    };
+    const context = new SearchContext(config, () => new StubEmbedder());
+    return context;
+  }
+
+  const throwingApi = {
+    async request() {
+      throw new Error("paperless unreachable in this test");
+    },
+  } as unknown as PaperlessAPI;
+
+  test("a positive interval leaves a live timer, through the real registration call", () => {
+    const context = contextWithInterval(60_000);
+    try {
+      const server = createMcpServer({
+        baseUrl: "http://paperless.test",
+        token: "test-token",
+        version: "0.0.0-test",
+        publicUrl: "http://paperless.test",
+      });
+      // The registration function is the CALLER. Asserting after calling it —
+      // rather than after calling start() directly — is the whole point.
+      registerSearchTools(server, throwingApi, context);
+      assert.equal(
+        context.isBackgroundSyncActive,
+        true,
+        "registerSearchTools must start the timer when an interval is configured"
+      );
+    } finally {
+      context.close();
+    }
+  });
+
+  test("an interval of 0 leaves NO timer", () => {
+    const context = contextWithInterval(0);
+    try {
+      const server = createMcpServer({
+        baseUrl: "http://paperless.test",
+        token: "test-token",
+        version: "0.0.0-test",
+        publicUrl: "http://paperless.test",
+      });
+      registerSearchTools(server, throwingApi, context);
+      assert.equal(
+        context.isBackgroundSyncActive,
+        false,
+        "an interval of 0 means no schedule, and 0 is the default"
+      );
+    } finally {
+      context.close();
+    }
+  });
+
+  test("close() clears the timer, so a stdio child cannot leave a dangling interval", () => {
+    const context = contextWithInterval(60_000);
+    const server = createMcpServer({
+      baseUrl: "http://paperless.test",
+      token: "test-token",
+      version: "0.0.0-test",
+      publicUrl: "http://paperless.test",
+    });
+    registerSearchTools(server, throwingApi, context);
+    assert.equal(context.isBackgroundSyncActive, true);
+    context.close();
+    assert.equal(
+      context.isBackgroundSyncActive,
+      false,
+      "close() must stop the interval it started"
+    );
+  });
+
+  test("startBackgroundSync is idempotent — a second call starts nothing new", () => {
+    // ⚠️ THIS TEST WAS WRONG WHEN FIRST WRITTEN, AND THE FAILURE WAS INFORMATIVE.
+    // It called `registerSearchTools` twice on one server to check idempotence,
+    // and the SDK refused with "Tool semantic_search is already registered".
+    // That is correct SDK behaviour -- a server cannot hold two tools of one
+    // name -- so the doubled call was never a scenario worth supporting.
+    //
+    // The property that actually matters is narrower: the timer must not be
+    // started twice if something asks twice. That is asserted here directly,
+    // because it is a different question from "is there a caller", which the
+    // three tests above already answer through the real registration path.
+    const context = contextWithInterval(60_000);
+    try {
+      context.startBackgroundSync(throwingApi);
+      assert.equal(context.isBackgroundSyncActive, true);
+      context.startBackgroundSync(throwingApi);
+      assert.equal(context.isBackgroundSyncActive, true);
+    } finally {
+      context.close();
+    }
+  });
+});
+
 describe("tool registration — walked from the real tools/list", () => {
   function configuredServer() {
     const config: SearchConfig = {
@@ -846,6 +1049,8 @@ describe("tool registration — walked from the real tools/list", () => {
       maxChunks: 4000,
       syncBatchSize: 16,
       syncIntervalMs: 0,
+      embeddingLocalOnly: false,
+      embeddingApiKey: undefined,
     };
     const server = createMcpServer({
       baseUrl: "http://paperless.test",

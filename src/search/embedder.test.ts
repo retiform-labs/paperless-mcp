@@ -5,7 +5,9 @@ import {
   OllamaEmbedder,
   PREFIXES,
   PrefixModeMismatchError,
-  assertLocalEmbeddingEndpoint,
+  embeddingsFromBody,
+  parseEmbeddingEndpoint,
+  resolveEmbeddingEndpoint,
   assertPrefixModeMatches,
 } from "./embedder";
 
@@ -50,84 +52,65 @@ function vectorOfWidth(width: number, head = 0.5): number[] {
   return Array.from({ length: width }, (_, index) => (index === 0 ? head : 0));
 }
 
-// ── The local-only guard ────────────────────────────────────────────────────────
-// A gate that only passes its happy path is untested. Every assertion below is
-// a negative case first.
+// ── Endpoint validation ────────────────────────────────────────────────────
+// Two layers, tested separately because they answer different questions:
+//   parseEmbeddingEndpoint  -- is this URL admissible at all?
+//   localOnly               -- is it admissible for a deployment that refuses
+//                              to send text off the host?
+// A gate that only passes its happy path is untested, so every case below is a
+// negative one first.
 
-describe("assertLocalEmbeddingEndpoint — the local-only guard", () => {
-  test("accepts loopback", () => {
-    for (const url of ["http://127.0.0.1:11434", "http://localhost:11434", "http://[::1]:11434"]) {
-      assert.doesNotThrow(() => assertLocalEmbeddingEndpoint(url), url);
-    }
-  });
-
-  test("accepts literal RFC1918 addresses", () => {
+describe("parseEmbeddingEndpoint — always-on hygiene", () => {
+  test("accepts loopback and RFC1918 with no flag set", () => {
     for (const url of [
+      "http://127.0.0.1:11434",
+      "http://localhost:11434",
+      "http://[::1]:11434",
       "http://127.0.0.1:11434",
       "http://192.0.2.10:11434",
       "http://172.16.0.1:11434",
-      "http://172.31.255.254:11434",
       "https://192.0.2.20:11434/v1",
     ]) {
-      assert.doesNotThrow(() => assertLocalEmbeddingEndpoint(url), url);
+      assert.doesNotThrow(() => parseEmbeddingEndpoint(url), url);
     }
   });
 
-  test("refuses a public DNS name", () => {
-    assert.throws(
-      () => assertLocalEmbeddingEndpoint("http://example.com"),
-      /not a literal loopback or RFC1918 address/
-    );
-  });
-
-  test("refuses a real remote provider, which is the whole point", () => {
-    assert.throws(
-      () => assertLocalEmbeddingEndpoint("https://api.example.com/v1"),
-      /not a literal loopback or RFC1918 address/
-    );
-    assert.throws(
-      () => assertLocalEmbeddingEndpoint("https://api.openai.com/v1"),
-      /not a literal loopback or RFC1918 address/
-    );
-  });
-
-  test("refuses a public literal address", () => {
-    assert.throws(
-      () => assertLocalEmbeddingEndpoint("http://8.8.8.8:11434"),
-      /public address/
-    );
-  });
-
-  test("refuses 172.15 and 172.32, which sit outside the RFC1918 window", () => {
-    for (const url of ["http://172.15.1.1:11434", "http://172.32.1.1:11434"]) {
-      assert.throws(() => assertLocalEmbeddingEndpoint(url), /public address/, url);
+  test("ACCEPTS a DNS name and a public host when local-only is off", () => {
+    // ⚠️ INVERTED. This was "refuses a public DNS name" / "refuses a real remote
+    // provider", asserting that `example.com` and `api.openai.com` throw
+    // unconditionally. That assertion was an opinionated deployment policy compiled into a
+    // library published for general use: a third-party install pointing at a
+    // hosted provider has done nothing wrong. The restriction still exists and
+    // is still tested below -- it is now a flag the deployment sets rather than
+    // a rule the package imposes.
+    for (const url of [
+      "http://example.com:11434",
+      "https://api.openai.com/v1",
+      "https://embeddings.example.net/v1/embeddings",
+      "http://8.8.8.8:11434",
+    ]) {
+      assert.doesNotThrow(() => parseEmbeddingEndpoint(url), url);
     }
   });
 
-  test("refuses 0.0.0.0 with an explanation naming the real fix", () => {
-    // Ollama BINDS 0.0.0.0 on this box, so the obvious naive check would be
-    // wrong in the opposite direction. Dialing the unspecified address is still
-    // not a destination.
-    assert.throws(
-      () => assertLocalEmbeddingEndpoint("http://0.0.0.0:11434"),
-      /unspecified address/
-    );
-  });
-
-  test("refuses a non-http protocol", () => {
-    assert.throws(
-      () => assertLocalEmbeddingEndpoint("file:///etc/passwd"),
-      /must use http: or https:/
-    );
-    assert.throws(
-      () => assertLocalEmbeddingEndpoint("ftp://127.0.0.1:21"),
-      /must use http: or https:/
-    );
+  test("refuses a non-http protocol, flag or no flag", () => {
+    for (const localOnly of [false, true]) {
+      assert.throws(
+        () => parseEmbeddingEndpoint("file:///etc/passwd", { localOnly }),
+        /must use http: or https:/,
+        `localOnly=${localOnly}`
+      );
+      assert.throws(
+        () => parseEmbeddingEndpoint("ftp://127.0.0.1:21", { localOnly }),
+        /must use http: or https:/,
+        `localOnly=${localOnly}`
+      );
+    }
   });
 
   test("refuses an unparseable URL", () => {
     assert.throws(
-      () => assertLocalEmbeddingEndpoint("not a url at all"),
+      () => parseEmbeddingEndpoint("not a url at all"),
       /not a valid URL/
     );
   });
@@ -137,20 +120,179 @@ describe("assertLocalEmbeddingEndpoint — the local-only guard", () => {
     // message is the parse failure rather than the allowlist refusal. Asserting
     // on the message would pin us to which check happens to fire first; what
     // matters is that the endpoint is refused. Measured, not assumed.
-    assert.throws(() => assertLocalEmbeddingEndpoint("http://999.0.0.1:11434"));
+    assert.throws(() => parseEmbeddingEndpoint("http://999.0.0.1:11434"));
   });
 });
 
-describe("OllamaEmbedder — the gate is in the constructor", () => {
-  test("refuses to construct against a remote host", () => {
+describe("parseEmbeddingEndpoint — the local-only restriction", () => {
+  test("refuses a public DNS name", () => {
+    assert.throws(
+      () => parseEmbeddingEndpoint("http://example.com", { localOnly: true }),
+      /not a literal loopback or RFC1918 address/
+    );
+  });
+
+  test("refuses a real remote provider, which is the whole point of the flag", () => {
+    assert.throws(
+      () => parseEmbeddingEndpoint("https://api.example.com/v1", { localOnly: true }),
+      /not a literal loopback or RFC1918 address/
+    );
+    assert.throws(
+      () => parseEmbeddingEndpoint("https://api.openai.com/v1", { localOnly: true }),
+      /not a literal loopback or RFC1918 address/
+    );
+  });
+
+  test("still accepts loopback and RFC1918 with the flag on", () => {
+    for (const url of [
+      "http://127.0.0.1:11434",
+      "http://192.0.2.10:11434",
+      "http://127.0.0.1:11434",
+    ]) {
+      assert.doesNotThrow(() => parseEmbeddingEndpoint(url, { localOnly: true }), url);
+    }
+  });
+
+  test("refuses a public literal address", () => {
+    assert.throws(
+      () => parseEmbeddingEndpoint("http://8.8.8.8:11434", { localOnly: true }),
+      /public address/
+    );
+  });
+
+  test("refuses 172.15 and 172.32, which sit outside the RFC1918 window", () => {
+    for (const url of ["http://172.15.1.1:11434", "http://172.32.1.1:11434"]) {
+      assert.throws(
+        () => parseEmbeddingEndpoint(url, { localOnly: true }),
+        /public address/,
+        url
+      );
+    }
+  });
+
+  test("refuses 0.0.0.0 with an explanation naming the real fix", () => {
+    // A server BINDS 0.0.0.0 on this box, so the obvious naive check would be
+    // wrong in the opposite direction. Dialing the unspecified address is still
+    // not a destination.
+    assert.throws(
+      () => parseEmbeddingEndpoint("http://0.0.0.0:11434", { localOnly: true }),
+      /unspecified address/
+    );
+  });
+
+  test("the flag defaults to OFF", () => {
+    // The default is a claim, so it gets a test: `parseEmbeddingEndpoint(url)`
+    // and `parseEmbeddingEndpoint(url, {})` must behave like localOnly:false.
+    assert.doesNotThrow(() => parseEmbeddingEndpoint("http://example.com"));
+    assert.doesNotThrow(() => parseEmbeddingEndpoint("http://example.com", {}));
+  });
+});
+
+describe("resolveEmbeddingEndpoint — where the request goes", () => {
+  test("an origin with no path falls back to Ollama's native route", () => {
+    assert.equal(
+      resolveEmbeddingEndpoint(new URL("http://127.0.0.1:11434")),
+      "http://127.0.0.1:11434/api/embed"
+    );
+  });
+
+  test("a trailing slash does not double the separator", () => {
+    assert.equal(
+      resolveEmbeddingEndpoint(new URL("http://127.0.0.1:11434/")),
+      "http://127.0.0.1:11434/api/embed"
+    );
+  });
+
+  test("a configured path gets /embeddings appended", () => {
+    assert.equal(
+      resolveEmbeddingEndpoint(new URL("https://api.openai.com/v1")),
+      "https://api.openai.com/v1/embeddings"
+    );
+  });
+
+  test("a full endpoint path is used verbatim, not appended twice", () => {
+    // This is the case a naive `+ "/embeddings"` breaks: the caller who read the
+    // docs and pasted the complete URL would get `.../embeddings/embeddings`.
+    assert.equal(
+      resolveEmbeddingEndpoint(new URL("https://host/v1/embeddings")),
+      "https://host/v1/embeddings"
+    );
+    assert.equal(
+      resolveEmbeddingEndpoint(new URL("https://host/v1/embeddings/")),
+      "https://host/v1/embeddings"
+    );
+  });
+});
+
+describe("embeddingsFromBody — both reply shapes", () => {
+  test("reads Ollama's native {embeddings: [[...]]}", () => {
+    const vector = vectorOfWidth(4, 0.25);
+    assert.deepEqual(embeddingsFromBody({ embeddings: [vector] }), [vector]);
+  });
+
+  test("reads the OpenAI-compatible {data: [{embedding: [...]}]}", () => {
+    const vector = vectorOfWidth(4, 0.25);
+    assert.deepEqual(
+      embeddingsFromBody({ object: "list", data: [{ object: "embedding", embedding: vector }] }),
+      [vector]
+    );
+  });
+
+  test("returns undefined for a body that is neither shape", () => {
+    // ⚠️ `{data: []}` is deliberately NOT in this list, and it was when the test
+    // was first written. An empty `data` array IS the OpenAI shape, just an
+    // empty one, exactly as `{embeddings: []}` is an empty native one -- so a
+    // parser that answered `undefined` for it would be inconsistent with
+    // itself. The refusal of an empty reply belongs one layer up, where the
+    // count check compares against the number of texts sent, and that is
+    // asserted separately below ("a mismatched embeddings count is refused").
+    for (const body of [null, undefined, 42, "text", {}, { data: [{}] }, { embeddings: 5 }]) {
+      assert.equal(embeddingsFromBody(body), undefined, JSON.stringify(body));
+    }
+  });
+
+  test("an empty array in either envelope parses to an empty list, not undefined", () => {
+    assert.deepEqual(embeddingsFromBody({ embeddings: [] }), []);
+    assert.deepEqual(embeddingsFromBody({ data: [] }), []);
+  });
+
+  test("a data array with a non-array embedding on any entry is not usable", () => {
+    // Half a reply is not a reply: returning the good half would silently
+    // shorten the corpus.
+    assert.equal(
+      embeddingsFromBody({ data: [{ embedding: [1, 2] }, { embedding: "nope" }] }),
+      undefined
+    );
+  });
+});
+
+describe("OllamaEmbedder — validation is in the constructor", () => {
+  test("refuses to construct against a remote host under localOnly", () => {
     assert.throws(
       () =>
         new OllamaEmbedder({
           url: "https://api.example.com/v1",
           model: "nomic-embed-text",
           prefixMode: "nomic",
+          localOnly: true,
         }),
       /not a literal loopback or RFC1918 address/
+    );
+  });
+
+  test("CONSTRUCTS against a remote host when localOnly is not set", () => {
+    // ⚠️ INVERTED. This asserted that construction against a remote provider
+    // throws. It was the policy, not the library: a published MCP server whose
+    // constructor refuses every hosted embedding provider is unusable for the
+    // general case it advertises.
+    assert.doesNotThrow(
+      () =>
+        new OllamaEmbedder({
+          url: "https://api.openai.com/v1",
+          model: "text-embedding-3-small",
+          prefixMode: "none",
+          apiKey: "sk-not-a-real-key",
+        })
     );
   });
 
@@ -178,7 +320,30 @@ describe("OllamaEmbedder — the gate is in the constructor", () => {
     );
   });
 
-  test("carries no credential: no auth header is ever attached", async () => {
+  test("refuses a non-positive batch size instead of silently defaulting", () => {
+    for (const batchSize of [0, -1, 1.5]) {
+      assert.throws(
+        () =>
+          new OllamaEmbedder({
+            url: "http://127.0.0.1:11434",
+            model: "nomic-embed-text",
+            prefixMode: "nomic",
+            batchSize,
+          }),
+        /batch size must be a positive whole number/,
+        String(batchSize)
+      );
+    }
+  });
+});
+
+describe("credentials", () => {
+  test("NO auth header is attached when no key is configured", async () => {
+    // ⚠️ INVERTED IN SCOPE, NOT IN ASSERTION. The old test was "carries no
+    // credential: no auth header is ever attached", and it asserted that a
+    // request carries exactly one header, `content-type`. The absence half is
+    // kept verbatim below; what changed is that the absence is now a
+    // consequence of there being no key rather than of there being no code.
     const captured = stubFetch(() => ({
       body: { embeddings: [vectorOfWidth(768)] },
     }));
@@ -198,8 +363,88 @@ describe("OllamaEmbedder — the gate is in the constructor", () => {
         `an embedding request must not carry ${forbidden}`
       );
     }
-    assert.equal(headerNames.length, 1);
-    assert.equal(headerNames[0], "content-type");
+    // Asserted as an exact set, not a length: a header added later should break
+    // this deliberately so someone decides whether it may be there.
+    assert.deepEqual(headerNames, ["content-type"]);
+  });
+
+  test("the key IS sent as Authorization: Bearer when configured", async () => {
+    const captured = stubFetch(() => ({
+      body: { embeddings: [vectorOfWidth(768)] },
+    }));
+    const embedder = new OllamaEmbedder({
+      url: "https://api.openai.com/v1",
+      model: "text-embedding-3-small",
+      prefixMode: "none",
+      apiKey: "sk-test-key-123",
+    });
+    await embedder.embedQuery("anything");
+    assert.equal(captured.length, 1);
+    assert.equal(
+      captured[0].headers.Authorization,
+      "Bearer sk-test-key-123"
+    );
+  });
+
+  test("the key never appears in an error message", async () => {
+    // The failure path is the one that gets logged. A credential in a
+    // diagnostic string outlives the request that used it.
+    const key = "sk-super-secret-value-that-must-not-leak";
+    for (const respond of [
+      // A non-2xx answer.
+      () => ({ status: 401, body: { error: "unauthorized" } }),
+      // A transport throw.
+      () => {
+        throw new Error("ECONNREFUSED");
+      },
+      // A body of the wrong shape.
+      () => ({ body: { nonsense: true } }),
+    ]) {
+      stubFetch(respond as never);
+      const embedder = new OllamaEmbedder({
+        url: "https://api.openai.com/v1",
+        model: "text-embedding-3-small",
+        prefixMode: "none",
+        apiKey: key,
+      });
+      await assert.rejects(
+        () => embedder.embedQuery("anything"),
+        (err: Error) => {
+          assert.ok(
+            !err.message.includes(key),
+            `the API key leaked into: ${err.message}`
+          );
+          assert.ok(!String(err.stack ?? "").includes(key), "key leaked into the stack");
+          return true;
+        }
+      );
+    }
+  });
+
+  test("the key is invisible to JSON, spread and Object.keys", async () => {
+    // ⚠️ THIS TEST FOUND A REAL DEFECT IN ITS OWN FIRST IMPLEMENTATION.
+    //
+    // The field was `private readonly apiKey?: string`. `private` is erased at
+    // compile time -- there is no runtime protection at all -- so the key was
+    // an own ENUMERABLE property and `JSON.stringify(embedder)` carried it. The
+    // KDoc two lines above it promised the opposite. The field is now a true ES
+    // private (`#apiKey`), which compiles to a WeakMap slot and is invisible to
+    // every reflective surface.
+    stubFetch(() => ({ body: { embeddings: [vectorOfWidth(768)] } }));
+    const key = "sk-another-secret";
+    const embedder = new OllamaEmbedder({
+      url: "https://api.openai.com/v1",
+      model: "m",
+      prefixMode: "none",
+      apiKey: key,
+    });
+    await embedder.embedQuery("x");
+    assert.ok(!JSON.stringify(embedder).includes(key), "JSON.stringify leaked the key");
+    assert.ok(!JSON.stringify({ ...embedder }).includes(key), "spread leaked the key");
+    assert.ok(!Object.keys(embedder).some((k) => k.toLowerCase().includes("key")));
+    assert.ok(!Object.getOwnPropertyNames(embedder).includes("#apiKey"));
+    // And it is still USED, so the privacy is not achieved by dropping it.
+    assert.ok(!JSON.stringify(embedder).includes("Bearer"));
   });
 });
 
@@ -412,7 +657,7 @@ describe("transport failures", () => {
 });
 
 describe("batching", () => {
-  test("splits documents into batches of sixteen", async () => {
+  test("defaults to sixteen per request when no batchSize is given", async () => {
     const captured = stubFetch((request) => ({
       body: { embeddings: request.body.input.map(() => vectorOfWidth(768)) },
     }));
@@ -430,6 +675,47 @@ describe("batching", () => {
     );
   });
 
+  test("a configured batchSize governs the request count: 7 texts at 3 is 3,3,1", async () => {
+    // ⚠️ THE WIRING TEST FOR PAPERLESS_MCP_SYNC_BATCH_SIZE, AND IT IS NOT A TEST
+    // OF THE OPTION. A test that passes 16 and asserts 16 would pass against a
+    // module constant that never reads the option at all, which is exactly the
+    // defect being fixed: the variable was read and range-checked in config.ts
+    // and consumed by nothing. The numbers here are deliberately not the
+    // default and not a divisor of the text count, so a hardcoded 16 produces
+    // [7] rather than [3,3,1].
+    const captured = stubFetch((request) => ({
+      body: { embeddings: request.body.input.map(() => vectorOfWidth(768)) },
+    }));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "nomic",
+      batchSize: 3,
+    });
+    const texts = Array.from({ length: 7 }, (_, index) => `doc ${index}`);
+    const result = await embedder.embedDocuments(texts);
+    assert.equal(result.length, 7);
+    assert.deepEqual(
+      captured.map((request) => request.body.input.length),
+      [3, 3, 1]
+    );
+  });
+
+  test("a batchSize larger than the input makes exactly one request", async () => {
+    const captured = stubFetch((request) => ({
+      body: { embeddings: request.body.input.map(() => vectorOfWidth(768)) },
+    }));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "nomic-embed-text",
+      prefixMode: "nomic",
+      batchSize: 64,
+    });
+    await embedder.embedDocuments(["a", "b", "c"]);
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].body.input.length, 3);
+  });
+
   test("an empty document list makes no request at all", async () => {
     const captured = stubFetch(() => ({ body: { embeddings: [] } }));
     const embedder = new OllamaEmbedder({
@@ -439,5 +725,74 @@ describe("batching", () => {
     });
     assert.deepEqual(await embedder.embedDocuments([]), []);
     assert.equal(captured.length, 0);
+  });
+});
+
+describe("both reply shapes, end to end through the client", () => {
+  test("an OpenAI-shaped server and an Ollama-shaped server yield the same vectors", async () => {
+    // The sniff is asserted at the parser level above; this proves the CLIENT
+    // reaches the parser with both, which is what a real provider swap depends
+    // on. Same numbers in, same numbers out, different envelopes.
+    const expected = vectorOfWidth(768, 0.125);
+    const native = stubFetch(() => ({ body: { embeddings: [expected] } }));
+    const viaNative = await new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "m",
+      prefixMode: "none",
+    }).embedQuery("q");
+    assert.equal(native.length, 1);
+    assert.deepEqual(viaNative, expected);
+
+    const openai = stubFetch(() => ({
+      body: { object: "list", data: [{ object: "embedding", embedding: expected }] },
+    }));
+    const viaOpenAi = await new OllamaEmbedder({
+      url: "https://api.openai.com/v1",
+      model: "m",
+      prefixMode: "none",
+      apiKey: "k",
+    }).embedQuery("q");
+    assert.equal(openai.length, 1);
+    assert.deepEqual(viaOpenAi, expected);
+    assert.deepEqual(viaNative, viaOpenAi);
+  });
+
+  test("an unrecognised body is an EmbeddingUnavailableError naming both shapes", async () => {
+    stubFetch(() => ({ body: { predictions: [[1, 2, 3]] } }));
+    const embedder = new OllamaEmbedder({
+      url: "http://127.0.0.1:11434",
+      model: "m",
+      prefixMode: "none",
+      dimensions: 3,
+    });
+    await assert.rejects(
+      () => embedder.embedQuery("q"),
+      (err: Error) => {
+        assert.ok(err instanceof EmbeddingUnavailableError);
+        assert.match(err.message, /OpenAI-compatible/);
+        assert.match(err.message, /Ollama/);
+        return true;
+      }
+    );
+  });
+});
+
+describe("transport options", () => {
+  test("redirect is always 'error', on every endpoint", async () => {
+    // Generic hygiene, not policy: a 307 would let any endpoint forward the
+    // request body to a host the configuration never named.
+    for (const url of ["http://127.0.0.1:11434", "https://api.openai.com/v1"]) {
+      const captured = stubFetch(() => ({
+        body: { embeddings: [vectorOfWidth(768)] },
+      }));
+      const embedder = new OllamaEmbedder({
+        url,
+        model: "m",
+        prefixMode: "none",
+        apiKey: "k",
+      });
+      await embedder.embedQuery("q");
+      assert.equal(captured[0].init.redirect, "error", url);
+    }
   });
 });

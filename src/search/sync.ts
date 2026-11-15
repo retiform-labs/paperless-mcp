@@ -225,6 +225,18 @@ export class IndexSync {
     return this.running !== undefined;
   }
 
+  /**
+   * True while a background timer is live.
+   *
+   * Distinct from `isRunning`, which reports a pass in flight: between two
+   * scheduled ticks the timer is set and nothing is running. A wiring test that
+   * asked `isRunning` would report "no schedule" on a working schedule whenever
+   * it happened to look between ticks.
+   */
+  get isScheduled(): boolean {
+    return this.timer !== undefined;
+  }
+
   private async doRun(): Promise<SyncReport> {
     const started = this.now();
     try {

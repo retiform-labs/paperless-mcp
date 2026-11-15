@@ -137,6 +137,66 @@ describe("searchConfig", () => {
   });
 });
 
+describe("embedding endpoint policy and credentials", () => {
+  test("local-only is OFF when the variable is absent", () => {
+    // The default is a claim about behaviour, so it gets an assertion. An
+    // install pointing at a hosted provider must not have to fight a policy it
+    // never asked for.
+    const config = searchConfig({ PAPERLESS_MCP_EMBEDDING_URL: "https://api.example.com/v1" });
+    assert.equal(config?.embeddingLocalOnly, false);
+  });
+
+  test("local-only turns on from the variable, in either accepted spelling", () => {
+    for (const raw of ["true", "TRUE", "1"]) {
+      const config = searchConfig({ PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY: raw });
+      assert.equal(config?.embeddingLocalOnly, true, raw);
+    }
+  });
+
+  test("local-only turns off explicitly, in either accepted spelling", () => {
+    for (const raw of ["false", "FALSE", "0"]) {
+      const config = searchConfig({ PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY: raw });
+      assert.equal(config?.embeddingLocalOnly, false, raw);
+    }
+  });
+
+  test("a mistyped flag REFUSES rather than defaulting to off", () => {
+    // ⚠️ The failure mode this prevents is the bad one: an operator who set a
+    // safety flag, mistyped it, got the default, and was told by a clean
+    // startup that the flag was in effect. A permissive boolean parser is a
+    // silent lie about configuration.
+    for (const raw of ["yes", "no", "on", "off", "ture", "2"]) {
+      assert.throws(
+        () => searchConfig({ PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY: raw }),
+        /must be true or false/,
+        raw
+      );
+    }
+  });
+
+  test("an API key alone does NOT enable the feature", () => {
+    // A credential is a modifier, not a request. An environment that happens to
+    // export a provider key must not silently switch on semantic search for an
+    // install that never configured an index.
+    assert.equal(searchConfig({ PAPERLESS_MCP_EMBEDDING_API_KEY: "sk-x" }), undefined);
+  });
+
+  test("the API key is carried alongside the rest of the config", () => {
+    const config = searchConfig({
+      PAPERLESS_MCP_EMBEDDING_URL: "https://api.example.com/v1",
+      PAPERLESS_MCP_EMBEDDING_API_KEY: "sk-abc",
+    });
+    assert.equal(config?.embeddingApiKey, "sk-abc");
+  });
+
+  test("no key means undefined, not an empty string", () => {
+    // An empty string would produce `Authorization: Bearer ` — a header that
+    // exists, is malformed, and changes what the server does.
+    const config = searchConfig({ PAPERLESS_MCP_EMBEDDING_URL: "http://127.0.0.1:11434" });
+    assert.equal(config?.embeddingApiKey, undefined);
+  });
+});
+
 describe("expandHome", () => {
   test("leaves an absolute path alone", () => {
     assert.equal(expandHome("/var/lib/x"), "/var/lib/x");

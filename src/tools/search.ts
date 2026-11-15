@@ -231,6 +231,7 @@ export class SearchContext {
   private store?: SearchIndex;
   private openFailed?: string;
   private sync?: IndexSync;
+  private syncStarted = false;
   private embedder?: Embedder | null;
   private readonly configOverride?: SearchConfig;
   private readonly embedderFactory?: (config: SearchConfig) => Embedder | undefined;
@@ -322,6 +323,12 @@ export class SearchContext {
             url: config.embeddingUrl,
             model: config.model,
             prefixMode: config.prefixMode,
+            // Threaded rather than defaulted here: the value is read and
+            // range-checked in config.ts, and a knob that is validated but
+            // never passed on is an advertised setting with no effect.
+            batchSize: config.syncBatchSize,
+            localOnly: config.embeddingLocalOnly,
+            ...(config.embeddingApiKey ? { apiKey: config.embeddingApiKey } : {}),
           });
       this.embedder = built ?? null;
     } catch {
@@ -352,10 +359,51 @@ export class SearchContext {
     return this.sync;
   }
 
+  /**
+   * Start the background sync timer when the deployment asked for one.
+   *
+   * ⚠️ THIS METHOD IS THE CALLER `IndexSync.start()` NEVER HAD. The interval was
+   * read and range-checked in config.ts from the day it was added, and nothing
+   * ever acted on it: `start()` existed, was documented, and was invoked from
+   * nowhere. A validated setting with no consumer reads as a working feature
+   * and is not one.
+   *
+   * Called from `registerSearchTools`, so the wiring is exercised by every
+   * server that configures search at all. A test that constructs the timer
+   * directly proves `start()` works and says nothing about whether anything
+   * calls it; the caller is what has to be asserted.
+   *
+   * A background sync that cannot start must not take down tool registration:
+   * the observable `sync_embeddings` tool still works, so failure here is
+   * logged and swallowed rather than thrown.
+   */
+  startBackgroundSync(api: PaperlessAPI): void {
+    if (this.syncStarted) return;
+    const config = this.config();
+    if (!config || config.syncIntervalMs <= 0) return;
+    try {
+      this.syncRunner(api).start(config.syncIntervalMs);
+      this.syncStarted = true;
+    } catch (err) {
+      console.error(
+        `[paperless-mcp] background sync not started: ${errorMessage(err)}`
+      );
+    }
+  }
+
+  /** True when a background sync timer is live. Used by the wiring test. */
+  get isBackgroundSyncActive(): boolean {
+    return this.sync?.isScheduled === true;
+  }
+
   close(): void {
+    // Stop the timer BEFORE dropping the reference, or a stdio child shutting
+    // down leaves an interval firing against a closed store.
+    this.sync?.stop();
     this.store?.close();
     this.store = undefined;
     this.sync = undefined;
+    this.syncStarted = false;
   }
 }
 
@@ -550,6 +598,9 @@ export function registerSearchTools(
   context = new SearchContext()
 ): SearchContext {
   if (!context.isConfigured) return context;
+
+  // Opt-in background sync. No-op unless PAPERLESS_MCP_SYNC_INTERVAL_MS > 0.
+  context.startBackgroundSync(api);
 
   const filterArgs = FILTER_SHAPE;
 

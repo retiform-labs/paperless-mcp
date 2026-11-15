@@ -7,9 +7,12 @@ import { join } from "node:path";
  * Deliberate differences from the reference implementation this was ported
  * from (`jaimemachado/paperless-mcp@50f7bee`):
  *
- *  - There is NO credential field of any kind, and no code path below attaches
- *    one to an embedding request. The local-only guard requires that a remote
- *    embedding provider cannot be reached by configuration alone.
+ *  - A remote embedding provider IS reachable by configuration, because this
+ *    package is published for general use and a third-party install must be
+ *    able to point it at whichever provider it has. What protects a deployment
+ *    that must not send text off the host is a flag it sets --
+ *    `PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY=true` -- not a restriction compiled
+ *    into the library on its behalf.
  *  - There is NO `useHttp` gate. That gate made semantic search dead on arrival
  *    in our deployment, because the gateway child is launched with no CLI args
  *    (`args: ["/path/to/build/index.js"]`) and so `--http`
@@ -31,6 +34,10 @@ export interface SearchConfig {
   readonly maxChunks: number;
   readonly syncBatchSize: number;
   readonly syncIntervalMs: number;
+  /** Restrict the embedding endpoint to a literal loopback/RFC1918 address. */
+  readonly embeddingLocalOnly: boolean;
+  /** Bearer token for the embedding endpoint, when one is required. */
+  readonly embeddingApiKey: string | undefined;
 }
 
 /**
@@ -58,6 +65,12 @@ export const DEFAULT_EMBEDDING_MODEL = "nomic-embed-text";
 export const DEFAULT_PREFIX_MODE: PrefixMode = "nomic";
 export const DEFAULT_MAX_CHUNKS = 4000;
 export const DEFAULT_SYNC_BATCH_SIZE = 16;
+/**
+ * Off by default. An install that must be able to prove indexed text does not
+ * leave the host turns it on; one that is pointing at a hosted provider must
+ * not have to fight a policy it never asked for.
+ */
+export const DEFAULT_EMBEDDING_LOCAL_ONLY = false;
 /** 0 means "no background sync". Opting in is explicit, never a default. */
 export const DEFAULT_SYNC_INTERVAL_MS = 0;
 
@@ -84,6 +97,8 @@ const SPECS = {
   maxChunks: { preferred: "PAPERLESS_MCP_MAX_CHUNKS" },
   syncBatchSize: { preferred: "PAPERLESS_MCP_SYNC_BATCH_SIZE" },
   syncIntervalMs: { preferred: "PAPERLESS_MCP_SYNC_INTERVAL_MS", fallback: "SYNC_INTERVAL_MS" },
+  embeddingLocalOnly: { preferred: "PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY" },
+  embeddingApiKey: { preferred: "PAPERLESS_MCP_EMBEDDING_API_KEY", fallback: "EMBEDDING_API_KEY" },
 } as const satisfies Record<string, EnvSpec>;
 
 function readVar(
@@ -132,6 +147,21 @@ function toNumber(where: string, raw: string, bounds: NumberBounds): number {
   return parsed;
 }
 
+/**
+ * Parse a boolean flag strictly.
+ *
+ * A flag that silently treats `"yes"`, `"1"` or a typo as false is worse than
+ * one that refuses: an operator who set a safety flag and got the default
+ * instead has been told the opposite of the truth by a green startup. So the
+ * accepted forms are enumerated and everything else throws.
+ */
+function toBoolean(where: string, raw: string): boolean {
+  const lowered = raw.toLowerCase();
+  if (lowered === "true" || lowered === "1") return true;
+  if (lowered === "false" || lowered === "0") return false;
+  throw new Error(`${where} must be true or false, not "${raw}".`);
+}
+
 function toPrefixMode(where: string, raw: string): PrefixMode {
   const modes: readonly string[] = PREFIX_MODES;
   if (!modes.includes(raw)) {
@@ -167,7 +197,14 @@ export function searchConfig(
   const maxChunks = readVar(env, SPECS.maxChunks);
   const syncBatchSize = readVar(env, SPECS.syncBatchSize);
   const syncIntervalMs = readVar(env, SPECS.syncIntervalMs);
+  const embeddingLocalOnly = readVar(env, SPECS.embeddingLocalOnly);
+  const embeddingApiKey = readVar(env, SPECS.embeddingApiKey);
 
+  // ⚠️ `embeddingApiKey` deliberately does NOT appear in this list, and the
+  // asymmetry is the point: a credential is a modifier, not a request to turn
+  // the feature on. Counting it here would mean an environment that happens to
+  // export a provider key silently switches on semantic search for an install
+  // that never configured an index.
   const anySet = [
     embeddingUrl,
     model,
@@ -176,6 +213,7 @@ export function searchConfig(
     maxChunks,
     syncBatchSize,
     syncIntervalMs,
+    embeddingLocalOnly,
   ].some(Boolean);
   if (!anySet) return undefined;
 
@@ -200,6 +238,10 @@ export function searchConfig(
     syncIntervalMs: syncIntervalMs
       ? toNumber(syncIntervalMs.name, syncIntervalMs.value, { min: 0, max: 86400000, integer: true })
       : DEFAULT_SYNC_INTERVAL_MS,
+    embeddingLocalOnly: embeddingLocalOnly
+      ? toBoolean(embeddingLocalOnly.name, embeddingLocalOnly.value)
+      : DEFAULT_EMBEDDING_LOCAL_ONLY,
+    embeddingApiKey: embeddingApiKey?.value,
   };
 }
 

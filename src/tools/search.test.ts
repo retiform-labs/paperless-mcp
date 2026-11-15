@@ -1142,3 +1142,188 @@ describe("tool registration — walked from the real tools/list", () => {
     }
   });
 });
+
+describe("the opt-in staleness report", () => {
+  /**
+   * These tests pin the two things the field can get wrong: a `false` that
+   * means "I could not check", and a report that is missing from the response
+   * path where a caller most needs it.
+   */
+
+  /** Write a watermark onto the fixture's index, as a completed sync would. */
+  function stampWatermark(
+    index: SearchIndex,
+    watermark: { count: number; modified: string | null; at: string }
+  ): void {
+    index.writeWatermark(watermark);
+  }
+
+  test("check_staleness is ABSENT by default and costs nothing", async () => {
+    const embedder = new StubEmbedder(2);
+    const { context, index, documents } = makeContext({ embedder });
+    try {
+      let probes = 0;
+      const result = await runSemanticSearch(context, "prana", {
+        limit: 5,
+        window: 300,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+        corpusState: async () => {
+          probes += 1;
+          return { count: 99, modified: null };
+        },
+      });
+      // Not merely "the fields are undefined" -- the probe was never called.
+      // A check that runs and then discards its answer would still cost the
+      // request it exists to avoid.
+      assert.equal(probes, 0, "the corpus must not be probed unless asked");
+      assert.equal("stale" in result, false);
+      assert.equal("index_age_s" in result, false);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("a moved watermark reports stale:true with a real index_age_s", async () => {
+    const embedder = new StubEmbedder(2);
+    const { context, index, documents } = makeContext({ embedder });
+    try {
+      stampWatermark(index, {
+        count: 1,
+        modified: "2026-11-15T00:00:00Z",
+        at: "2026-11-15T00:00:00Z",
+      });
+      const result = await runSemanticSearch(context, "prana", {
+        limit: 5,
+        window: 300,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+        checkStaleness: true,
+        corpusState: async () => ({ count: 5, modified: "2026-11-15T06:00:00Z" }),
+        now: () => Date.parse("2026-11-15T01:00:00Z"),
+      });
+
+      assert.equal(result.stale, true);
+      assert.equal(result.index_age_s, 3600);
+      assert.equal(result.live_count, 5);
+      assert.equal(result.indexed_count, 1);
+      // The search itself is unaffected: an annotation, never a gate.
+      assert.ok(result.passages.length > 0);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("an unchanged watermark reports stale:false", async () => {
+    const embedder = new StubEmbedder(2);
+    const { context, index, documents } = makeContext({ embedder });
+    try {
+      stampWatermark(index, {
+        count: 2,
+        modified: "2026-11-15T00:00:00Z",
+        at: "2026-11-15T00:00:00Z",
+      });
+      const result = await runSemanticSearch(context, "prana", {
+        limit: 5,
+        window: 300,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+        checkStaleness: true,
+        corpusState: async () => ({ count: 2, modified: "2026-11-15T00:00:00Z" }),
+        now: () => Date.parse("2026-11-15T00:10:00Z"),
+      });
+      assert.equal(result.stale, false);
+      assert.equal(result.index_age_s, 600);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("PAPERLESS DOWN yields stale:null with a reason, NEVER a fabricated false", async () => {
+    // The whole reason the field is nullable. A `false` produced because the
+    // probe failed would be a clean bill of health nobody measured.
+    const embedder = new StubEmbedder(2);
+    const { context, index, documents } = makeContext({ embedder });
+    try {
+      stampWatermark(index, {
+        count: 2,
+        modified: "2026-11-15T00:00:00Z",
+        at: "2026-11-15T00:00:00Z",
+      });
+      const result = await runSemanticSearch(context, "prana", {
+        limit: 5,
+        window: 300,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+        checkStaleness: true,
+        // readCorpusState's contract: undefined on failure, never a throw.
+        corpusState: async () => undefined,
+        now: () => Date.parse("2026-11-15T00:10:00Z"),
+      });
+
+      assert.equal(result.stale, null, "an unchecked staleness must never be false");
+      assert.match(String(result.staleness_reason), /could not be read/);
+      assert.equal(result.live_count, null);
+      // The index's own age is still knowable, and reporting it is not a guess.
+      assert.equal(result.index_age_s, 600);
+      assert.equal(result.indexed_count, 2);
+      // AND THE SEARCH STILL WORKED. An annotation must never cost the results.
+      assert.ok(result.passages.length > 0, "the search must still return results");
+    } finally {
+      index.close();
+    }
+  });
+
+  test("an index with no watermark yields stale:null, not stale:true", async () => {
+    // Unknown is not the same as stale. Asserting either would be a guess, and
+    // `true` would be the more damaging guess: it would send a caller to rebuild
+    // a perfectly current index.
+    const embedder = new StubEmbedder(2);
+    const { context, index, documents } = makeContext({ embedder });
+    try {
+      const result = await runSemanticSearch(context, "prana", {
+        limit: 5,
+        window: 300,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+        checkStaleness: true,
+        corpusState: async () => ({ count: 2, modified: "2026-11-15T00:00:00Z" }),
+        now: () => Date.parse("2026-11-15T00:10:00Z"),
+      });
+      assert.equal(result.stale, null);
+      assert.match(String(result.staleness_reason), /no recorded watermark/);
+      assert.equal(result.index_age_s, null);
+      assert.equal(result.indexed_count, null);
+      assert.equal(result.live_count, 2);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("the staleness fields appear on an EMPTY result too", async () => {
+    // The response path a caller is most likely to be looking at when it
+    // wonders whether the index is current. Computing the report only on the
+    // populated return would omit it from exactly that case.
+    //
+    // `embedder: null` AND a query with no lexical match, so the fused list is
+    // genuinely empty. A working embedder would produce a vector hit for any
+    // query (the stub returns a fixed axis), which would make this test assert
+    // about the populated path while claiming to test the empty one.
+    const { context, index, documents } = makeContext({ embedder: null });
+    try {
+      stampWatermark(index, {
+        count: 1,
+        modified: "2026-11-15T00:00:00Z",
+        at: "2026-11-15T00:00:00Z",
+      });
+      const result = await runSemanticSearch(context, "zzzznothingatall", {
+        limit: 5,
+        window: 300,
+        loadDocuments: async (ids) => resolveDocuments(ids, documents),
+        checkStaleness: true,
+        corpusState: async () => ({ count: 4, modified: "2026-11-15T06:00:00Z" }),
+        now: () => Date.parse("2026-11-15T01:00:00Z"),
+      });
+      assert.equal(result.passages.length, 0);
+      assert.equal(result.stale, true, "the annotation must survive an empty result");
+      assert.equal(result.index_age_s, 3600);
+    } finally {
+      index.close();
+    }
+  });
+});

@@ -46,6 +46,23 @@
 //   would keep the old name in its metadata chunk forever. That chunk is
 //   vector- and lexical-indexed, so the stale name stays searchable.
 //
+//   ⚠️ THAT REFRESH SURVIVES THE WATERMARK, AND IT IS NOT REDUNDANT WITH IT.
+//   Measured against Paperless' own bulk-edit code: `set_correspondent`,
+//   `set_document_type`, `set_storage_path` and `add_tag` all go through
+//   `qs.update(...)` or a `bulk_create` on the through-table. Neither fires
+//   `auto_now`, so none of them bumps `modified`. A corpus-level watermark is
+//   therefore structurally blind to an M2M edit — it cannot see one even in
+//   principle, let alone in this implementation. Deleting the refresh on the
+//   theory that the watermark subsumes it would re-open the stale-metadata hole
+//   it was written to close. It is a candidate for WIDENING (a cheaper M2M
+//   probe), never for removal.
+//
+//   THE WATERMARK. `count` and `max(modified)` are recorded at the end of every
+//   completed run, and consulted at the start of the next one as a single
+//   request. A run against an unchanged corpus returns in ~218 ms without
+//   paging a single document. `force` bypasses it, because `force` is a
+//   statement about the stored vectors rather than about the corpus.
+//
 //   AN EMBEDDING OUTAGE ABORTS THE WHOLE RUN. The alternative -- skip the
 //   document, carry on, report `failed` -- leaves an index that is missing
 //   documents while `documents` rows claim they are indexed, which is worse
@@ -66,7 +83,12 @@
 import { PaperlessAPI } from "../api/PaperlessAPI";
 import { chunkText, metadataText, MAX_CHUNKS } from "./chunk";
 import { EmbeddingUnavailableError, type Embedder } from "./embedder";
-import { SCHEMA_VERSION, SearchIndex, type StoredChunk } from "./store";
+import {
+  SCHEMA_VERSION,
+  SearchIndex,
+  type StoredChunk,
+  type Watermark,
+} from "./store";
 
 /** How often a document's metadata chunk is rebuilt regardless of `modified`. */
 export const METADATA_REFRESH_MS = 24 * 60 * 60 * 1000;
@@ -84,6 +106,82 @@ export const DOCUMENT_LIST_PATH =
 
 /** A repeated or endless `next` would otherwise keep a run pending forever. */
 export const MAX_LIST_PAGES = 10_000;
+
+/**
+ * One request that answers "how big is the corpus, and when did it last move".
+ *
+ * Deliberately NOT a walk of the document list. The list is paged at 1000 rows
+ * with a full `id,modified` payload per row; on a corpus of a few thousand that
+ * is several requests and a few hundred kilobytes to learn two scalars. This is
+ * ONE request and about 200 bytes.
+ *
+ * `ordering=-modified&page_size=1` makes `results[0].modified` the maximum over
+ * the whole corpus, which is the value the incremental diff is keyed on.
+ */
+export const WATERMARK_PATH =
+  "/documents/?fields=id,modified&ordering=-modified&page_size=1";
+
+/** The two scalars, and nothing else. */
+export interface CorpusState {
+  count: number;
+  /** `max(modified)` over the corpus, or null when the corpus is empty. */
+  modified: string | null;
+}
+
+/**
+ * Whether the live corpus differs from the indexed one.
+ *
+ * ⚠️ COMPARED AS INSTANTS, NOT STRINGS. `modified` arrives as an ISO 8601 string
+ * with an offset, and the same moment can be serialised with a different offset
+ * (`…+00:00` one day, `…-05:00` the next). A string compare would report a
+ * change on every run and defeat the entire point of the watermark, while
+ * looking exactly like a working check. The existing document diff already got
+ * this right; this is the same treatment applied to the corpus-level value.
+ *
+ * `count` is checked FIRST and separately. It is the only signal a soft delete
+ * produces: Paperless clears `deleted_at` through a queryset `.update()`, which
+ * does not fire `auto_now`, so a deleted document never bumps `max(modified)`.
+ * The count still drops, and the count is free in the same response.
+ */
+export function corpusChanged(live: CorpusState, watermark: Watermark): boolean {
+  if (live.count !== watermark.count) return true;
+  if (live.modified === null) return watermark.modified !== null;
+  if (watermark.modified === null) return true;
+  return new Date(live.modified).getTime() > new Date(watermark.modified).getTime();
+}
+
+/**
+ * The corpus's size and newest `modified`, from ONE request.
+ *
+ * Returns undefined when the request fails. A watermark probe that THROWS would
+ * turn a cosmetic optimisation into a hard dependency: the sync would stop
+ * working on any Paperless that declines this particular query, when the list
+ * walk it already knows how to do would have succeeded. Falling back to the full
+ * diff is always correct, merely slower.
+ *
+ * Module-level rather than a private method because two callers need it — the
+ * sync's skip check and the search tool's opt-in staleness report — and two
+ * copies of "which fields, which ordering, which page size" is how they drift
+ * apart. One request shape, one place.
+ */
+export async function readCorpusState(
+  api: PaperlessAPI,
+  requestTimeoutMs?: number
+): Promise<CorpusState | undefined> {
+  try {
+    const page = await api.request<PaperlessPage<{ id: number; modified: string }>>(
+      WATERMARK_PATH,
+      requestTimeoutMs !== undefined
+        ? { signal: AbortSignal.timeout(requestTimeoutMs) }
+        : {}
+    );
+    const first = (page.results ?? [])[0];
+    return { count: page.count, modified: first?.modified ?? null };
+  } catch (err) {
+    log(`the corpus watermark could not be read: ${errorMessage(err)}`);
+    return undefined;
+  }
+}
 
 /** Without a limit, a Paperless that never answers keeps a run pending forever. */
 export const REQUEST_TIMEOUT_MS = 60_000;
@@ -105,6 +203,18 @@ export interface SyncReport {
    * only evidence the fallback is load-bearing rather than merely present.
    */
   splits: number;
+  /**
+   * True when the run returned without touching the index because the live
+   * corpus matched the recorded watermark.
+   *
+   * Reported rather than left implicit: a skipped run and a run that found
+   * nothing to do produce identical counts (all zero), and the difference is
+   * the whole reason the watermark exists. A caller that cannot tell them apart
+   * cannot tell a 218 ms no-op from a wasted full sweep.
+   */
+  skipped: boolean;
+  /** Why the run skipped, when it did. Absent otherwise. */
+  skipReason?: string;
 }
 
 interface NameMaps {
@@ -241,9 +351,9 @@ export class IndexSync {
    * against the same stale `indexed()` snapshot and the loser's deletes would
    * remove the winner's work.
    */
-  run(): Promise<SyncReport> {
+  run(opts: { force?: boolean } = {}): Promise<SyncReport> {
     if (!this.running) {
-      this.running = this.doRun().finally(() => {
+      this.running = this.doRun(opts).finally(() => {
         this.running = undefined;
       });
     }
@@ -288,11 +398,15 @@ export class IndexSync {
     return this.timer !== undefined;
   }
 
-  private async doRun(): Promise<SyncReport> {
+  private async doRun(opts: { force?: boolean }): Promise<SyncReport> {
     const started = this.now();
     try {
-      const report = await this.syncAll();
+      const report = await this.syncAll(opts);
       const seconds = ((this.now() - started) / 1000).toFixed(1);
+      if (report.skipped) {
+        log(`run finished in ${seconds}s: SKIPPED (${report.skipReason})`);
+        return report;
+      }
       log(
         `run finished in ${seconds}s: +${report.added} added, ` +
           `~${report.updated} updated, -${report.deleted} deleted, ` +
@@ -307,7 +421,7 @@ export class IndexSync {
     }
   }
 
-  private async syncAll(): Promise<SyncReport> {
+  private async syncAll(opts: { force?: boolean }): Promise<SyncReport> {
     const report: SyncReport = {
       added: 0,
       updated: 0,
@@ -316,6 +430,7 @@ export class IndexSync {
       failed: 0,
       deletedSkipped: false,
       splits: 0,
+      skipped: false,
     };
 
     // ⚠️ THE INDEX'S IDENTITY IS WRITTEN BY THE RUN, NOT BY THE FIXTURE.
@@ -338,6 +453,57 @@ export class IndexSync {
       prefixMode: this.embedder.prefixMode,
     });
 
+    // ── THE WATERMARK, CONSULTED BEFORE ANY PAGING ──────────────────────────
+    //
+    // One request, two scalars. If the corpus has not moved since the last run
+    // there is no diff to compute and the run returns having cost ~218 ms
+    // instead of a paged walk of every document id.
+    //
+    // ⚠️ `force` BYPASSES THIS ENTIRELY. `force` means "the stored vectors are
+    // not trustworthy" — it is a statement about the INDEX, not about the
+    // corpus. Letting the watermark short-circuit it would make `force` a no-op
+    // on the second call, which is a silent lie about what the flag does.
+    const live = opts.force
+      ? undefined
+      : await readCorpusState(this.api, this.requestTimeoutMs);
+    if (live) {
+      const watermark = this.store.watermark();
+      // No stored watermark means this index predates the watermark, or has
+      // never completed a run. Either way there is nothing to compare against
+      // and the diff must run: treating an absent watermark as "nothing
+      // changed" would skip the first sync after an upgrade and then keep
+      // skipping, permanently and silently.
+      if (watermark && !corpusChanged(live, watermark)) {
+        report.skipped = true;
+        report.skipReason =
+          `the corpus matches the last run (${live.count} documents, ` +
+          `max(modified) ${live.modified ?? "none"}); the document diff was ` +
+          `skipped`;
+        // ⚠️ A SKIP SKIPS THE DIFF, NOT THE METADATA REFRESH.
+        //
+        // This is the whole reason the watermark cannot subsume the refresh: a
+        // tag, correspondent or document-type edit goes through a queryset
+        // `.update()` on a through-table, `auto_now` never fires, and neither
+        // `count` nor `max(modified)` moves. A corpus can be byte-identical in
+        // both scalars while a document's metadata chunk is stale.
+        //
+        // So the refresh runs here too. On a freshly-synced index every stamp
+        // is inside the window and this loop makes ZERO requests, which is what
+        // keeps the "one request" promise true in the common case. When it does
+        // have work to do, that work is real and skipping it would leave a
+        // corrected sender's old name searchable forever.
+        //
+        // ⚠️ The `remote` membership filter the main path uses is NOT available
+        // here — there is no list walk — so this iterates the indexed ids
+        // directly. A document deleted since the last run could therefore be
+        // refreshed once before the next count-changing run removes it. One
+        // wasted embedding, self-correcting, and strictly better than a stale
+        // metadata chunk living forever.
+        await this.refreshStaleMetadata(report, this.store.indexed(), undefined);
+        return report;
+      }
+    }
+
     const remote = new Map<number, string>();
     const { rows, count } = await this.listAll<{ id: number; modified: string }>(
       DOCUMENT_LIST_PATH
@@ -346,6 +512,27 @@ export class IndexSync {
 
     const indexed = this.store.indexed();
 
+    // ── DELETES, AND WHY THE COUNT IS THE ONLY SIGNAL THAT SEES THEM ────────
+    //
+    // A soft delete in Paperless sets `deleted_at` through a queryset
+    // `.update()`. That bypasses the model layer, so `auto_now` never fires and
+    // `modified` does not move — which means `max(modified)` is structurally
+    // BLIND to a deletion and can never be the signal that triggers one.
+    //
+    // `count` is not blind. It drops. And it costs nothing here: it arrived in
+    // the same list response this walk already reads.
+    //
+    // So the watermark comparison above decomposes into three cases, and this
+    // is why it checks `count` FIRST rather than treating the two scalars as
+    // interchangeable:
+    //   count down, modified unchanged  -> a deletion. The delete step below
+    //                                      runs; nothing else has changed.
+    //   count same, modified newer      -> additions or edits. The diff runs.
+    //   count same, modified same       -> nothing at all. The run skips.
+    //
+    // ⚠️ DO NOT "SIMPLIFY" THIS INTO A SINGLE max(modified) CHECK. It reads like
+    // a tidier condition and it silently stops deleting anything, forever.
+    //
     // A list whose rows disagree with its own count changed while it was being
     // paged. A missing row is then indistinguishable from a deleted document,
     // so the delete step is skipped rather than trusted.
@@ -368,6 +555,12 @@ export class IndexSync {
     }
 
     const toSync = [...remote.entries()].filter(([id, modified]) => {
+      // `force` re-embeds every document, not merely the changed ones. Bypassing
+      // the watermark alone would make `force` a no-op on a corpus whose
+      // `modified` values are all unchanged, which is the common case — the flag
+      // exists precisely for "the stored vectors are not trustworthy", and a
+      // trustworthy-looking `modified` says nothing about that.
+      if (opts.force) return true;
       const stored = indexed.get(id);
       if (stored === undefined) return true;
       // Compared as instants, not strings: Paperless may re-serialise the same
@@ -414,10 +607,72 @@ export class IndexSync {
     // The 24 h metadata refresh. Tags, correspondents and document types change
     // without touching `modified`, so without this a corrected sender stays in
     // the metadata chunk -- which is indexed both ways -- forever.
+    //
+    // Documents just reindexed above are excluded: their metadata chunk was
+    // rebuilt as part of the reindex seconds ago.
+    const refreshTargets = new Map(
+      [...indexed.keys()].filter((id) => !reindexed.has(id)).map((id) => [id, ""] )
+    );
+    await this.refreshStaleMetadata(report, refreshTargets, remote);
+
+    // ── THE WATERMARK IS WRITTEN AT THE END, FROM THE LIST WE ACTUALLY READ ──
+    //
+    // Not from a second probe. The list walk already reported `count`, and
+    // `remote` holds every `modified` it returned, so the maximum is arithmetic
+    // over data already in hand rather than another request.
+    //
+    // ⚠️ DELIBERATELY NOT `Math.max(...remote.values())`. Spreading a few
+    // thousand values into an argument list is a stack-depth question for no
+    // benefit, and `new Date(x).getTime()` is the comparison the rest of this
+    // file already uses. Instants, not strings.
+    let newest: string | null = null;
+    let newestAt = -Infinity;
+    for (const modified of remote.values()) {
+      const at = new Date(modified).getTime();
+      if (Number.isFinite(at) && at > newestAt) {
+        newestAt = at;
+        newest = modified;
+      }
+    }
+    // ⚠️ ONLY WHEN THE LIST WAS COMPLETE. A partial page set means documents
+    // were moving while the walk ran, so the maximum it saw is a maximum over a
+    // subset — recording it would state "the corpus is up to date through here"
+    // on the strength of a list that was known to be short.
+    if (listComplete) {
+      this.store.writeWatermark({
+        count,
+        modified: newest,
+        at: new Date(this.now()).toISOString(),
+      });
+    }
+
+    return report;
+  }
+
+  /**
+   * Rebuild the metadata chunk of every indexed document whose stamp is older
+   * than the refresh window.
+   *
+   * Extracted because TWO paths need it: the full run, and the watermark skip.
+   * A skip that returned before this would silently retire the 24 h refresh on
+   * any corpus that had stopped changing — and a stopped corpus is exactly the
+   * one whose tags and correspondents still get edited by hand, because nobody
+   * is uploading to it.
+   *
+   * `remote` is optional: the full run passes the live id set so a document
+   * deleted since the last sync is not refreshed, while the skip path has no
+   * list to consult and passes undefined.
+   */
+  private async refreshStaleMetadata(
+    report: SyncReport,
+    indexed: Map<number, string>,
+    remote: Map<number, string> | undefined
+  ): Promise<void> {
     const stamps = this.store.metadataStamps();
     const refreshBefore = this.now() - METADATA_REFRESH_MS;
+    let names: NameMaps | undefined;
     for (const id of indexed.keys()) {
-      if (reindexed.has(id) || !remote.has(id)) continue;
+      if (remote && !remote.has(id)) continue;
       const metadataAt = stamps.get(id);
       if (metadataAt && new Date(metadataAt).getTime() >= refreshBefore) continue;
       try {
@@ -439,8 +694,6 @@ export class IndexSync {
         );
       }
     }
-
-    return report;
   }
 
   /**

@@ -10,6 +10,8 @@ import {
   DOCUMENT_LIST_PATH,
   IndexSync,
   METADATA_REFRESH_MS,
+  WATERMARK_PATH,
+  corpusChanged,
   pathAfterApi,
   type SyncReport,
 } from "./sync";
@@ -100,6 +102,16 @@ class FakeApi {
   listTruncation = 0;
   failDocumentIds = new Set<number>();
   requests: string[] = [];
+  /** Make the watermark probe itself fail, the way a Paperless outage would. */
+  failWatermark = false;
+  /**
+   * Override the `modified` the watermark probe reports, so a test can express
+   * "the corpus moved" or "the same instant in a different offset" without
+   * having to mutate every document it holds.
+   */
+  watermarkModifiedOverride: string | undefined;
+  /** Override the count the probe reports, independently of the list's count. */
+  watermarkCountOverride: number | undefined;
   private listPageSize = 1000;
 
   add(doc: Partial<FakeDoc> & { id: number }): FakeDoc {
@@ -123,6 +135,38 @@ class FakeApi {
 
   async request<T>(path: string): Promise<T> {
     this.requests.push(path);
+
+    // The watermark probe. Matched EXACTLY rather than by prefix: the document
+    // list path shares its first 27 characters with this one, and a prefix test
+    // would route the probe into the list branch and quietly make every
+    // watermark assertion vacuous.
+    if (path === WATERMARK_PATH) {
+      if (this.failWatermark) throw new Error("paperless is down");
+      const all = [...this.documents.values()];
+      let newest: string | null = null;
+      let newestAt = -Infinity;
+      for (const doc of all) {
+        const at = new Date(doc.modified).getTime();
+        if (Number.isFinite(at) && at > newestAt) {
+          newestAt = at;
+          newest = doc.modified;
+        }
+      }
+      return {
+        // `listTruncation` is applied here too, and that is deliberate: it
+        // models "the server's count is higher than the rows a page returns",
+        // which is a fact about `count`. A watermark that disagreed with the
+        // list about the corpus size would make the delete-skip test pass for
+        // the wrong reason.
+        count: this.watermarkCountOverride ?? all.length + this.listTruncation,
+        next: null,
+        results: this.watermarkModifiedOverride !== undefined
+          ? [{ id: 0, modified: this.watermarkModifiedOverride }]
+          : newest === null
+            ? []
+            : [{ id: 0, modified: newest }],
+      } as unknown as T;
+    }
 
     if (path.startsWith(DOCUMENT_LIST_PATH)) {
       const all = [...this.documents.values()]
@@ -724,6 +768,474 @@ describe("IndexSync — a failure names its document, and says whether the run s
       const report = await makeSync({ api, index, embedder: plain }).run();
       assert.equal(report.splits, 0);
       assert.equal(report.added, 1);
+    } finally {
+      index.close();
+    }
+  });
+});
+
+describe("IndexSync — the watermark", () => {
+  /**
+   * ⚠️ EVERY TEST HERE COUNTS REQUESTS OFF `api.requests`, NOT OFF THE REPORT.
+   *
+   * Asserting `skipped: true` would pass against an implementation that walked
+   * the entire document list and then decided there was nothing to do. The whole
+   * point of the watermark is that a no-op run costs ONE request instead of a
+   * paged sweep, and only a request count can tell those apart. `requests` is
+   * appended to at the top of `FakeApi.request`, so it is a census of every call
+   * the sync made, in order.
+   */
+  function requestsDuring(api: FakeApi, fn: () => Promise<unknown>): Promise<void> {
+    api.requests = [];
+    return fn().then(() => undefined);
+  }
+
+  test("an unchanged corpus makes EXACTLY ONE request and reports skipped", async () => {
+    const api = new FakeApi();
+    api.add({ id: 1, modified: "2026-11-15T00:00:00Z" });
+    api.add({ id: 2, modified: "2026-11-14T00:00:00Z" });
+    const index = openIndex();
+    const embedder = new StubEmbedder();
+    try {
+      const sync = makeSync({ api, index, embedder });
+      await sync.run(); // first run: builds and records the watermark
+
+      // Counted as a DELTA: the first run embedded both documents, so an
+      // absolute count here would fail for a reason that has nothing to do with
+      // the skip.
+      const embedCallsBefore = embedder.calls;
+
+      let report: SyncReport | undefined;
+      await requestsDuring(api, async () => {
+        report = await sync.run();
+      });
+
+      assert.equal(report?.skipped, true, "the second run must report skipped");
+      assert.match(String(report?.skipReason), /matches the last run/);
+      // THE ASSERTION THAT MATTERS. One request, and it is the probe.
+      assert.deepEqual(api.requests, [WATERMARK_PATH]);
+      assert.equal(
+        embedder.calls - embedCallsBefore,
+        0,
+        "no document may be re-embedded on a skip"
+      );
+    } finally {
+      index.close();
+    }
+  });
+
+  test("a moved corpus runs the diff and does not report skipped", async () => {
+    const api = new FakeApi();
+    api.add({ id: 1, modified: "2026-11-15T00:00:00Z" });
+    const index = openIndex();
+    const embedder = new StubEmbedder();
+    try {
+      const sync = makeSync({ api, index, embedder });
+      await sync.run();
+
+      // A new document arrives. This changes BOTH count and max(modified).
+      api.add({ id: 2, modified: "2026-11-15T06:00:00Z" });
+
+      let report: SyncReport | undefined;
+      await requestsDuring(api, async () => {
+        report = await sync.run();
+      });
+
+      assert.equal(report?.skipped, false, "a moved corpus must not skip");
+      assert.equal(report?.skipReason, undefined);
+      assert.equal(report?.added, 1);
+      // It walked the list, which is at least one more request than the probe.
+      assert.ok(
+        api.requests.filter((path) => path.startsWith(DOCUMENT_LIST_PATH)).length > 0,
+        "the diff must actually page the document list"
+      );
+    } finally {
+      index.close();
+    }
+  });
+
+  test("a DROPPED count runs the delete path even though max(modified) cannot see it", async () => {
+    // The trap this test exists for: a soft delete in Paperless goes through a
+    // queryset `.update()`, so `auto_now` never fires and `modified` does not
+    // move. `max(modified)` is structurally blind to it. Only `count` drops.
+    //
+    // The deleted document is deliberately the OLDEST, so removing it leaves
+    // max(modified) identical -- isolating count as the sole signal. Without
+    // that, this test would pass on a `max(modified)` check alone and prove
+    // nothing about the count.
+    const api = new FakeApi();
+    api.add({ id: 1, modified: "2026-11-15T00:00:00Z" });
+    api.add({ id: 2, modified: "2026-11-14T00:00:00Z" });
+    const index = openIndex();
+    const embedder = new StubEmbedder();
+    try {
+      const sync = makeSync({ api, index, embedder });
+      await sync.run();
+      assert.equal(index.counts().documents, 2);
+
+      api.remove(2); // the oldest, so max(modified) is unchanged
+
+      let report: SyncReport | undefined;
+      await requestsDuring(api, async () => {
+        report = await sync.run();
+      });
+
+      assert.equal(report?.skipped, false, "a dropped count must not skip");
+      assert.equal(report?.deleted, 1, "the delete path must run");
+      assert.equal(report?.deletedSkipped, false);
+      assert.equal(index.counts().documents, 1, "the row must be gone from the index");
+      assert.equal(index.indexed().has(2), false);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("force:true does the full run even when the watermark says nothing changed", async () => {
+    // `force` means "the stored vectors are not trustworthy", which is a
+    // statement about the INDEX. If the watermark short-circuited it, `force`
+    // would become a no-op on the second call and silently lie about its effect.
+    const api = new FakeApi();
+    api.add({ id: 1, modified: "2026-11-15T00:00:00Z" });
+    const index = openIndex();
+    const embedder = new StubEmbedder();
+    try {
+      const sync = makeSync({ api, index, embedder });
+      await sync.run();
+
+      let report: SyncReport | undefined;
+      await requestsDuring(api, async () => {
+        report = await sync.run({ force: true });
+      });
+
+      assert.equal(report?.skipped, false, "force must never skip");
+      assert.equal(report?.updated, 1, "force must re-embed the document");
+      assert.ok(embedder.calls > 1, "the embedder must have been called again");
+    } finally {
+      index.close();
+    }
+  });
+
+  test("the same instant in a different offset is NOT a change", async () => {
+    // Paperless may re-serialise one moment with a different UTC offset. A
+    // string compare would report a change on every run, defeating the watermark
+    // while looking exactly like a working check.
+    const api = new FakeApi();
+    api.add({ id: 1, modified: "2026-11-15T00:00:00Z" });
+    const index = openIndex();
+    try {
+      const sync = makeSync({ api, index, embedder: new StubEmbedder() });
+      await sync.run();
+
+      // The first run recorded max(modified) as "2026-11-15T00:00:00Z".
+      // The probe now reports the SAME INSTANT written as
+      // "2026-11-15T05:00:00+05:00".
+      //
+      // ⚠️ As STRINGS the probe value sorts GREATER ("05:00" > "00:00" at
+      // offset 11), so a string comparison reports "changed" and the run
+      // proceeds -- this test then fails. As INSTANTS they are the same moment,
+      // so it skips. That disagreement is what makes this a real falsifier.
+      //
+      // (The earlier arrangement used -05:00 against a Z value, where the
+      // string ALSO sorted lower and a string compare therefore said "not
+      // changed" too. It passed under both implementations. Caught by the
+      // mutation run, not by reading it.)
+      api.watermarkModifiedOverride = "2026-11-15T05:00:00+05:00";
+      // The list still reports the original, which is what the diff compares --
+      // but the PROBE now says something that differs as a string and not as an
+      // instant. If the comparison were a string compare, the run would proceed.
+      let report: SyncReport | undefined;
+      await requestsDuring(api, async () => {
+        report = await sync.run();
+      });
+
+      assert.equal(
+        report?.skipped,
+        true,
+        "the same instant in another offset must compare equal"
+      );
+      assert.deepEqual(api.requests, [WATERMARK_PATH]);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("an index with no recorded watermark runs the full diff", async () => {
+    // The upgrade path. An index built before the watermark existed must not be
+    // treated as "nothing changed" -- that would skip the first sync after an
+    // upgrade and then keep skipping forever.
+    const api = new FakeApi();
+    api.add({ id: 1, modified: "2026-11-15T00:00:00Z" });
+    const index = openIndex();
+    try {
+      assert.equal(index.watermark(), undefined, "the fixture must start with none");
+      const report = await makeSync({ api, index, embedder: new StubEmbedder() }).run();
+      assert.equal(report.skipped, false);
+      assert.equal(report.added, 1);
+      // And the run records one for next time.
+      assert.equal(index.watermark()?.count, 1);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("a run whose list disagreed with its count records NO watermark", async () => {
+    // ⚠️ THE GUARD THIS PINS IS `if (listComplete)` AROUND `writeWatermark`.
+    //
+    // A partial page set means documents were moving while the walk ran, so the
+    // maximum it saw is a maximum over a SUBSET. Recording that as the
+    // watermark would state "the corpus is unchanged through here" on the
+    // strength of a list that was known to be short — and the NEXT run would
+    // then compare equal and skip, permanently, on an index that is missing
+    // whatever arrived mid-flight.
+    //
+    // Found by a surviving mutation: removing the guard broke nothing, which
+    // means nothing was asserting it.
+    const api = new FakeApi();
+    api.add({ id: 1, modified: "2026-11-15T00:00:00Z" });
+    const index = openIndex();
+    try {
+      // The server counts two documents but returns one: the mid-run-mutation
+      // signature.
+      api.listTruncation = 1;
+      const report = await makeSync({
+        api,
+        index,
+        embedder: new StubEmbedder(),
+      }).run();
+
+      assert.equal(report.deletedSkipped, true, "the list was short, so deletes skip");
+      assert.equal(
+        index.watermark(),
+        undefined,
+        "a known-incomplete walk must not record a watermark"
+      );
+
+      // And the consequence, stated directly: the next run does the real work
+      // rather than skipping on a watermark it should never have trusted.
+      api.listTruncation = 0;
+      const after = await makeSync({ api, index, embedder: new StubEmbedder() }).run();
+      assert.equal(after.skipped, false, "the next run must not skip");
+      assert.equal(index.watermark()?.count, 1, "a complete run records one");
+    } finally {
+      index.close();
+    }
+  });
+
+  test("a failed watermark probe falls back to the full diff rather than failing", async () => {
+    // A cosmetic optimisation must not become a hard dependency. If the probe
+    // query is refused, the list walk it already knows how to do still works.
+    const api = new FakeApi();
+    api.add({ id: 1, modified: "2026-11-15T00:00:00Z" });
+    const index = openIndex();
+    try {
+      const sync = makeSync({ api, index, embedder: new StubEmbedder() });
+      await sync.run();
+
+      api.failWatermark = true;
+      const report = await sync.run();
+      assert.equal(report.skipped, false, "an unreadable probe must not skip");
+    } finally {
+      index.close();
+    }
+  });
+});
+
+describe("corpusChanged", () => {
+  const watermark = { count: 3, modified: "2026-11-15T00:00:00Z", at: "2026-11-15T00:01:00Z" };
+
+  test("equal count and instant is unchanged", () => {
+    assert.equal(
+      corpusChanged({ count: 3, modified: "2026-11-15T00:00:00Z" }, watermark),
+      false
+    );
+  });
+
+  test("a different count is a change, even with the same instant", () => {
+    // The deletion case. This is the assertion that keeps a future "tidy-up"
+    // from collapsing the two scalars into one max(modified) check.
+    assert.equal(
+      corpusChanged({ count: 2, modified: "2026-11-15T00:00:00Z" }, watermark),
+      true
+    );
+  });
+
+  test("a newer instant is a change", () => {
+    assert.equal(
+      corpusChanged({ count: 3, modified: "2026-11-15T00:00:01Z" }, watermark),
+      true
+    );
+  });
+
+  test("the same instant in another offset is not a change", () => {
+    // ⚠️ THE OFFSETS ARE CHOSEN SO THE TWO IMPLEMENTATIONS DISAGREE.
+    //
+    // Live is "2026-11-15T00:00:00Z"; the watermark holds the SAME instant as
+    // "2026-11-14T19:00:00-05:00". Compared as strings, the live value sorts
+    // GREATER (11-15 beats 11-14), so a string compare reports "changed" and
+    // this assertion fails. Compared as instants they are equal, so it passes.
+    //
+    // The first version of this test used the opposite arrangement, in which a
+    // string compare ALSO said "not changed" — so it passed under both
+    // implementations and was worthless as a falsifier. The mutation run is
+    // what caught it.
+    const sameInstant = "2026-11-15T00:00:00Z";
+    const serialisedElsewhere = "2026-11-14T19:00:00-05:00";
+    assert.notEqual(sameInstant, serialisedElsewhere, "the strings must differ");
+    assert.equal(
+      new Date(sameInstant).getTime(),
+      new Date(serialisedElsewhere).getTime(),
+      "the instants must be identical"
+    );
+    assert.ok(
+      sameInstant > serialisedElsewhere,
+      "and the string ordering must DISAGREE with the instant ordering"
+    );
+
+    assert.equal(
+      corpusChanged({ count: 3, modified: sameInstant }, {
+        ...watermark,
+        modified: serialisedElsewhere,
+      }),
+      false
+    );
+  });
+
+  test("a live corpus that reports no modification time differs from one that has one", () => {
+    // Same count, but the live side says there is no newest document while the
+    // watermark names one. That is a real disagreement and must read as changed:
+    // silently treating a null as "nothing moved" would freeze the index on any
+    // Paperless that briefly answered with an empty page.
+    assert.equal(corpusChanged({ count: 3, modified: null }, watermark), true);
+    // And the mirror: a watermark that recorded an empty corpus cannot be
+    // matched by a live side that now has documents.
+    assert.equal(
+      corpusChanged({ count: 0, modified: null }, { ...watermark, count: 0 }),
+      true
+    );
+  });
+});
+
+describe("the watermark's persistence", () => {
+  test("round-trips through a close and reopen", async () => {
+    const api = new FakeApi();
+    api.add({ id: 1, modified: "2026-11-15T00:00:00Z" });
+    api.add({ id: 2, modified: "2026-11-15T05:00:00Z" });
+    const path = tempIndexPath();
+    const index = new SearchIndex(path);
+    index.open();
+    try {
+      await makeSync({
+        api,
+        index,
+        embedder: new StubEmbedder(),
+        now: () => Date.parse("2026-11-15T12:00:00Z"),
+      }).run();
+      const written = index.watermark();
+      assert.deepEqual(written, {
+        count: 2,
+        modified: "2026-11-15T05:00:00Z",
+        at: "2026-11-15T12:00:00.000Z",
+      });
+    } finally {
+      index.close();
+    }
+
+    const reopened = new SearchIndex(path);
+    reopened.open();
+    try {
+      assert.deepEqual(reopened.watermark()?.count, 2);
+      assert.equal(reopened.watermark()?.modified, "2026-11-15T05:00:00Z");
+    } finally {
+      reopened.close();
+    }
+  });
+
+  test("an index built WITHOUT the watermark keys opens and queries unchanged", async () => {
+    // The upgrade path, stated as a property of the STORE rather than the run.
+    // `meta()` reads four named keys and never enumerates, so extra rows are
+    // structurally invisible to `assertSchemaCompatible` -- but that is a claim
+    // about the code, and this is the test that holds it.
+    const path = tempIndexPath();
+    const index = new SearchIndex(path);
+    index.open();
+    index.writeMeta({
+      schemaVersion: SCHEMA_VERSION,
+      dimensions: EMBEDDING_DIMENSIONS,
+      model: "stub-embed",
+      prefixMode: "none",
+    });
+    // NO writeWatermark. This is exactly the shape an older build produced.
+    assert.equal(index.watermark(), undefined);
+    index.close();
+
+    const reused = new SearchIndex(path, {
+      expected: {
+        dimensions: EMBEDDING_DIMENSIONS,
+        model: "stub-embed",
+        prefixMode: "none",
+      },
+    });
+    // Must not throw: the schema guard has no opinion about a watermark.
+    reused.open();
+    try {
+      const meta = reused.assertSchemaCompatible();
+      assert.equal(meta.model, "stub-embed");
+      assert.equal(reused.watermark(), undefined);
+      assert.deepEqual(reused.counts().documents, 0);
+    } finally {
+      reused.close();
+    }
+  });
+
+  test("writing a watermark leaves the schema version and identity untouched", async () => {
+    const path = tempIndexPath();
+    const index = new SearchIndex(path);
+    index.open();
+    try {
+      index.writeMeta({
+        schemaVersion: SCHEMA_VERSION,
+        dimensions: EMBEDDING_DIMENSIONS,
+        model: "stub-embed",
+        prefixMode: "none",
+      });
+      const before = index.meta();
+      index.writeWatermark({
+        count: 7,
+        modified: "2026-11-15T00:00:00Z",
+        at: "2026-11-15T00:01:00Z",
+      });
+      // The whole reason the watermark is not a schema bump: adding it must not
+      // change what the index says about how to read its vectors.
+      assert.deepEqual(index.meta(), before);
+    } finally {
+      index.close();
+    }
+  });
+
+  test("a half-written watermark reads as absent, not as a measurement", async () => {
+    const path = tempIndexPath();
+    const index = new SearchIndex(path);
+    index.open();
+    try {
+      index.writeMeta({
+        schemaVersion: SCHEMA_VERSION,
+        dimensions: EMBEDDING_DIMENSIONS,
+        model: "stub-embed",
+        prefixMode: "none",
+      });
+      index.writeWatermark({
+        count: 7,
+        modified: "2026-11-15T00:00:00Z",
+        at: "2026-11-15T00:01:00Z",
+      });
+      // Simulate rows written by different builds: drop one key.
+      index.close();
+      const raw = new SearchIndex(path);
+      raw.open();
+      const db = raw.open();
+      db.prepare("DELETE FROM index_meta WHERE key = 'watermark_modified'").run();
+      assert.equal(raw.watermark(), undefined);
+      raw.close();
     } finally {
       index.close();
     }

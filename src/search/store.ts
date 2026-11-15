@@ -21,7 +21,9 @@ import { assertPrefixModeMatches } from "./embedder";
  *   chunks       doc_id, position, kind, text          (PK: doc_id, position)
  *   vec_chunks   embedding float[768] distance_metric=cosine
  *   fts          FTS5 over chunks.text, contentless, rowid = chunk rowid
- *   index_meta   key/value: schema_version, dimensions, model, prefix_mode
+ *   index_meta   key/value: schema_version, dimensions, model, prefix_mode,
+ *                plus the sync watermark (watermark_count, watermark_modified,
+ *                watermark_at) — see Watermark below
  *
  * ── The five measured traps, each handled explicitly ──────────────────────
  * Every one of these was reproduced on this box under the gateway child's
@@ -155,6 +157,43 @@ export interface IndexMeta {
   dimensions: number;
   model: string;
   prefixMode: PrefixMode;
+}
+
+/**
+ * What the corpus looked like when the index was last brought up to date.
+ *
+ * ── Why these are SEPARATE KEYS and not part of `IndexMeta` ─────────────────
+ *
+ * `meta()` reads the key/value table and returns a FIXED object built from four
+ * named keys. It never enumerates, so any other row is structurally invisible
+ * to it — which is exactly why `assertSchemaCompatible` cannot start refusing an
+ * index just because these rows exist. A watermark is not schema: it is a
+ * measurement of the remote corpus taken at a point in time, and a reader that
+ * does not know about it must be able to open the index unchanged.
+ *
+ * That matters in the direction that actually bites: an index built BEFORE these
+ * keys existed must still open, and an index written WITH them must still open
+ * under a build that predates them. Both hold because neither side enumerates.
+ *
+ * ⚠️ Adding keys here is deliberately NOT a `SCHEMA_VERSION` bump. A bump would
+ * refuse every existing index and force a rebuild that takes most of an hour, to
+ * add three rows nobody has to read.
+ */
+export interface Watermark {
+  /** Live document count at the moment the sync finished. */
+  count: number;
+  /**
+   * `max(modified)` over the corpus at that moment, or null on an empty corpus.
+   *
+   * Stored as the string Paperless sent, not as an epoch, because it is a
+   * POINT OF COMPARISON rather than a value anything reads. Comparison is by
+   * instant at the call site anyway — Paperless may re-serialise one moment with
+   * a different UTC offset, and a string compare would then report a change on
+   * every single run.
+   */
+  modified: string | null;
+  /** ISO timestamp of when that sync finished. Reported, never compared. */
+  at: string;
 }
 
 export interface Counts {
@@ -467,6 +506,69 @@ export class SearchIndex {
       upsert.run("prefix_mode", meta.prefixMode);
     });
     write();
+  }
+
+  /**
+   * Record what the remote corpus looked like when this sync finished.
+   *
+   * Written through the same upsert as `writeMeta` and in its own transaction,
+   * because the two are separate facts with separate lifetimes: the identity is
+   * written BEFORE the work (so the index never holds vectors whose provenance
+   * it cannot state) while the watermark can only be written AFTER it. A single
+   * transaction spanning both would mean the identity could not be committed
+   * until the corpus had been read.
+   */
+  writeWatermark(watermark: Watermark): void {
+    const db = this.handle();
+    const upsert = db.prepare(
+      "INSERT INTO index_meta (key, value) VALUES (?, ?) " +
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value"
+    );
+    const write = db.transaction(() => {
+      upsert.run("watermark_count", String(watermark.count));
+      // An empty corpus has no `max(modified)`. `null` is stored as the literal
+      // "null" rather than as an absent row, so "the index was synced against an
+      // empty corpus" stays distinguishable from "the index has never been
+      // synced" — the two read identically to `watermark()` otherwise, and the
+      // first is a real state that a caller may legitimately see.
+      upsert.run("watermark_modified", watermark.modified ?? "null");
+      upsert.run("watermark_at", watermark.at);
+    });
+    write();
+  }
+
+  /**
+   * Read the stored watermark, or undefined when this index has never recorded
+   * one.
+   *
+   * Undefined is the honest answer for an index built before the watermark
+   * existed, and it must STAY honest: the caller runs the full diff in that
+   * case. Defaulting to `{count: 0}` would claim the corpus was empty, and the
+   * first sync after an upgrade would then skip on nothing having changed —
+   * silently, permanently.
+   */
+  watermark(): Watermark | undefined {
+    const rows = this.handle()
+      .prepare(
+        "SELECT key, value FROM index_meta WHERE key IN " +
+          "('watermark_count', 'watermark_modified', 'watermark_at')"
+      )
+      .all() as { key: string; value: string }[];
+    if (rows.length === 0) return undefined;
+    const map = new Map(rows.map((row) => [row.key, row.value]));
+    const count = map.get("watermark_count");
+    const modified = map.get("watermark_modified");
+    const at = map.get("watermark_at");
+    // All three or none. A partial set means the rows were written by different
+    // builds, and a half-watermark is not a measurement of anything.
+    if (count === undefined || modified === undefined || at === undefined) {
+      return undefined;
+    }
+    return {
+      count: Number(count),
+      modified: modified === "null" ? null : modified,
+      at,
+    };
   }
 
   /**

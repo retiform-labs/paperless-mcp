@@ -47,7 +47,13 @@ import {
   type Hit,
 } from "../search/store";
 import { fuse, type Fused } from "../search/rank";
-import { IndexSync, type SyncReport } from "../search/sync";
+import {
+  IndexSync,
+  corpusChanged,
+  readCorpusState,
+  type CorpusState,
+  type SyncReport,
+} from "../search/sync";
 import { withErrorHandling } from "./utils/middlewares";
 
 /** A similarity at or above this is a strong match. Similarity, never distance. */
@@ -167,6 +173,27 @@ export interface SemanticSearchResult {
    * to assert a mechanism that had not happened.
    */
   retrievers: Array<"vector" | "lexical">;
+  /**
+   * Whether the index still reflects the live corpus. Present ONLY when the
+   * caller asked for it with `check_staleness`, because the check costs one
+   * extra request and most calls do not need it.
+   *
+   * ⚠️ `null` MEANS "I COULD NOT CHECK", NEVER "NOT STALE". That distinction is
+   * the entire point of making this nullable: a `false` produced because
+   * Paperless did not answer would be a fabricated clean bill of health, and
+   * fabricating one is the failure mode this whole arc has been written against.
+   * A caller that sees `null` knows to retry; a caller that sees `false` knows
+   * the index is current.
+   */
+  stale?: boolean | null;
+  /** Age of the index in seconds, from the recorded sync time. Null when unknown. */
+  index_age_s?: number | null;
+  /** Live document count, or null when the probe failed. */
+  live_count?: number | null;
+  /** How many documents the index's own watermark claims. Null when unknown. */
+  indexed_count?: number | null;
+  /** Why staleness could not be determined, when it could not. */
+  staleness_reason?: string;
   passages: SemanticPassage[];
 }
 
@@ -422,11 +449,39 @@ export async function runSemanticSearch(
     window: number;
     loadDocuments: (ids: number[]) => Promise<Map<number, VisibleDocument>>;
     filters?: (doc: VisibleDocument) => boolean;
+    /** Opt in to the staleness report. Costs one extra request when true. */
+    checkStaleness?: boolean;
+    /**
+     * How to read the live corpus. Injected rather than imported so the search
+     * path has no opinion about which API client is in use, and so a test can
+     * supply a corpus without a network.
+     */
+    corpusState?: () => Promise<CorpusState | undefined>;
+    /** Injectable clock, so `index_age_s` is testable. */
+    now?: () => number;
   }
 ): Promise<SemanticSearchResult> {
   const store = context.index();
   const limit = Math.min(Math.max(opts.limit, 1), MAX_LIMIT);
   const terms = queryTerms(query);
+
+  // ── THE STALENESS REPORT, BUILT BEFORE THE SEARCH SO ONE SPREAD SENDS IT ──
+  //
+  // Computed once and spread into BOTH return paths (the empty-fused early
+  // return and the main one). Computing it twice would be two probes for one
+  // answer, and computing it only on the main path would silently omit it from
+  // exactly the response where a caller is most likely to wonder whether the
+  // index is current — an empty result.
+  //
+  // ⚠️ A FAILED PROBE YIELDS `stale: null`, NEVER `false`. "I could not check"
+  // and "I checked and it is current" are different facts, and a search that
+  // fabricates the second because Paperless was down would be lying about the
+  // one thing this field exists to report. The search itself is unaffected: the
+  // degradation contract already covers a dead embedder, and a dead Paperless
+  // costs only this annotation.
+  const stalenessFields = opts.checkStaleness
+    ? await readStaleness(opts.corpusState, store, opts.now)
+    : {};
 
   let semantic: SemanticSearchResult["semantic"] = "ok";
   const reasons: string[] = [];
@@ -525,6 +580,7 @@ export async function runSemanticSearch(
       total_hits: 0,
       filtered_out: 0,
       retrievers,
+      ...stalenessFields,
       // State (a) on its own terms: nothing matched and the payload says so —
       // `semantic`, `retrievers`, and an empty list together are unambiguous.
       passages: [],
@@ -587,7 +643,79 @@ export async function runSemanticSearch(
       ? { filtered_out_reasons: { document_unavailable: documentUnavailable, metadata_filter: metadataFiltered } }
       : {}),
     retrievers,
+    ...stalenessFields,
     passages,
+  };
+}
+
+/**
+ * The staleness annotation, as a spreadable fragment.
+ *
+ * Returns the fields with `stale: null` when the corpus cannot be read or the
+ * index carries no watermark. Neither invents a value.
+ *
+ * ⚠️ AN INDEX WITH NO WATERMARK IS `stale: null`, NOT `stale: true`. It is
+ * genuinely unknown — the index predates the watermark, or has never completed
+ * a run — and asserting either answer would be a guess dressed as a measurement.
+ * The actionable thing for such a caller is `sync_embeddings`, and
+ * `staleness_reason` says exactly that.
+ */
+async function readStaleness(
+  corpusState: (() => Promise<CorpusState | undefined>) | undefined,
+  store: SearchIndex,
+  now: (() => number) | undefined
+): Promise<Partial<SemanticSearchResult>> {
+  if (!corpusState) {
+    return {
+      stale: null,
+      index_age_s: null,
+      live_count: null,
+      indexed_count: null,
+      staleness_reason: "No corpus probe was available to this call.",
+    };
+  }
+  const live = await corpusState();
+  const watermark = store.watermark();
+  const indexedCount = watermark?.count ?? null;
+
+  if (!watermark) {
+    return {
+      stale: null,
+      index_age_s: null,
+      live_count: live?.count ?? null,
+      indexed_count: null,
+      staleness_reason:
+        "The index has no recorded watermark (it predates one, or has never " +
+        "completed a sync), so staleness cannot be determined. Run " +
+        "sync_embeddings.",
+    };
+  }
+
+  // Age is computable from the stored timestamp alone, so it is reported even
+  // when the live probe failed — it is a fact about the index, not about the
+  // corpus.
+  const syncedAt = new Date(watermark.at).getTime();
+  const indexAge = Number.isFinite(syncedAt)
+    ? Math.max(0, Math.round(((now ?? Date.now)() - syncedAt) / 1000))
+    : null;
+
+  if (!live) {
+    return {
+      stale: null,
+      index_age_s: indexAge,
+      live_count: null,
+      indexed_count: indexedCount,
+      staleness_reason:
+        "The live corpus could not be read, so staleness cannot be " +
+        "determined. The search results above are unaffected.",
+    };
+  }
+
+  return {
+    stale: corpusChanged(live, watermark),
+    index_age_s: indexAge,
+    live_count: live.count,
+    indexed_count: indexedCount,
   };
 }
 
@@ -623,15 +751,29 @@ export function registerSearchTools(
         .max(4000)
         .optional()
         .describe(`Characters per passage (default ${DEFAULT_WINDOW}).`),
+      check_staleness: z
+        .boolean()
+        .optional()
+        .describe(
+          "Also report whether the index still matches the live corpus: `stale`, `index_age_s`, `live_count`, `indexed_count`. Costs one extra request (~44% on a sub-second call), so it is off by default. `stale: null` means the check could not be made — NOT that the index is current."
+        ),
       ...filterArgs,
     },
     withErrorHandling(async (args) => {
-      const { limit, window, ...filters } = args;
+      // `check_staleness` is destructured OUT of `filters`, not left in it.
+      // `buildDocumentFilter` ignores unknown keys today, so leaving it there
+      // would work and would also mean every future filter key has to remember
+      // to exclude it — a silent coupling rather than a stated one.
+      const { limit, window, check_staleness, ...filters } = args;
       const result = await runSemanticSearch(context, args.query, {
         limit: limit ?? DEFAULT_LIMIT,
         window: window ?? DEFAULT_WINDOW,
         loadDocuments: (ids) => loadVisibleDocuments(api, ids),
         filters: buildDocumentFilter(filters),
+        ...(check_staleness ? { checkStaleness: true } : {}),
+        // Bound late: `api` is this server's client, and the probe must use the
+        // same one the rest of the tool does.
+        corpusState: () => readCorpusState(api),
       });
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
@@ -691,7 +833,13 @@ export function registerSearchTools(
         const store = context.index();
         store.deleteDocuments([...store.indexed().keys()]);
       }
-      const report: SyncReport = await runner.run();
+      // ⚠️ `force` IS PASSED THROUGH, not merely acted on locally. The pre-sync
+      // delete below empties the document rows so the diff sees everything as
+      // new; the flag ALSO has to reach `run()` because the watermark check
+      // there would otherwise skip the run it just prepared for. Both halves are
+      // required: without the delete the vectors are stale, and without the flag
+      // the run does nothing at all.
+      const report: SyncReport = await runner.run({ force: args.force === true });
       return {
         content: [{ type: "text", text: JSON.stringify(report) }],
       };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { exitCodeForReport } from "../../scripts/build-index";
+import { exitCodeForReport } from "./build-outcome";
 
 /**
  * A partial build is not a success.

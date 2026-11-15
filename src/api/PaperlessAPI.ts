@@ -51,6 +51,13 @@ export class PaperlessAPI {
         method: options.method || "GET",
         headers: mergedHeaders,
         data: options.body,
+        // `signal` was accepted and DROPPED here until it was wired: the
+        // RequestInit type advertises it, callers pass it, and axios never saw
+        // it, so a per-request timeout was silently a no-op. The long-running
+        // index sync is what needs it — without it, a Paperless that accepts
+        // the connection and then stalls holds the sync open indefinitely
+        // while the calling code reads as though it set a budget.
+        ...(options.signal ? { signal: options.signal } : {}),
       });
 
       const body = response.data;

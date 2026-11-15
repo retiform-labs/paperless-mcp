@@ -615,6 +615,37 @@ export class SearchIndex {
     run();
   }
 
+  /**
+   * The stored chunks of one document, in position order.
+   *
+   * A read accessor, and it exists because `textHits`/`vectorHits` return only
+   * the BEST chunk per document -- correct for ranking, useless for asserting
+   * what a document actually contains. Without it a test can only observe the
+   * metadata chunk by getting lucky with a query.
+   */
+  chunksFor(docId: number): { position: number; kind: "metadata" | "content"; text: string }[] {
+    return this.handle()
+      .prepare(
+        "SELECT position, kind, text FROM chunks WHERE doc_id = ? ORDER BY position ASC"
+      )
+      .all(docId) as { position: number; kind: "metadata" | "content"; text: string }[];
+  }
+
+  /**
+   * How many indexed documents were cut off at the chunk cap.
+   *
+   * Exposed because truncation is the one index fact that changes what a caller
+   * can conclude from a miss: a truncated document lost its tail, so "no such
+   * text" may be a false negative rather than an absence.
+   */
+  truncatedCount(): number {
+    return (
+      this.handle().prepare("SELECT count(*) AS c FROM documents WHERE truncated = 1").get() as {
+        c: number;
+      }
+    ).c;
+  }
+
   counts(): Counts {
     const db = this.handle();
     const one = (sql: string): number =>
@@ -732,7 +763,13 @@ export class SearchIndex {
 export function toFtsMatch(query: string): string | null {
   const terms = query
     .toLowerCase()
-    .split(/[^\p{L}\p{N}_]+/u)
+    // \p{M} is REQUIRED, not decorative. A Tibetan syllable is a base letter
+    // plus combining marks -- U+0FB3 and U+0F74 are category Mn, not L -- so
+    // splitting on [^\p{L}\p{N}_] tears "རླུང" into "ར" and "ང": two fragments,
+    // neither of which is the word. Measured on this build. This corpus is
+    // heavily Tibetan, so the bug would have made those terms unfindable
+    // lexically while looking like an ordinary no-match.
+    .split(/[^\p{L}\p{N}\p{M}_]+/u)
     .filter((term) => term.length > 0);
   if (terms.length === 0) return null;
   // Cap the expression: a 500-term OR is pathological and slower than the

@@ -8,6 +8,7 @@ import { registerDocumentTools } from "./tools/documents";
 import { registerDocumentTypeTools } from "./tools/documentTypes";
 import { registerMailTools } from "./tools/mail";
 import { registerNoteTools } from "./tools/notes";
+import { registerSearchTools, SearchContext } from "./tools/search";
 import { registerTagTools } from "./tools/tags";
 
 export interface CreateMcpServerOptions {
@@ -36,6 +37,21 @@ export function createMcpServer({
   registerDocumentTypeTools(server, api);
   registerCustomFieldTools(server, api);
   registerMailTools(server, api);
+  // Semantic search registers ONLY when its configuration is present. The
+  // gateway passes one environment to every child, so an unconfigured install
+  // must not advertise three tools that would fail on first call -- and must
+  // not open a ~1 GB SQLite file at startup to decide. SearchContext resolves
+  // the config and opens nothing; the open happens on the first tool call.
+  const searchContext = registerSearchTools(server, api);
+  // `onclose` lives on the low-level Server (exposed as `server.server`), not on
+  // McpServer, and the SDK does not set it -- verified in protocol.js: `_onclose()`
+  // calls `this.onclose?.()`, and mcp.js never assigns it. Chaining rather than
+  // overwriting so a future SDK assignment is not silently clobbered.
+  const previousOnClose = server.server.onclose;
+  server.server.onclose = () => {
+    previousOnClose?.();
+    searchContext.close();
+  };
   return server;
 }
 

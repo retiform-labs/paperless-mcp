@@ -15,7 +15,8 @@ This is a fork of [baruchiro/paperless-mcp](https://github.com/baruchiro/paperle
 Upstream returns whole documents. That is fine for a human clicking through a UI
 and crippling for an agent: a single `get_document_content` call on a
 several-hundred-page PDF can consume an entire context window, and there is no
-way to ask for a slice. This fork adds bounded reads:
+way to ask for a slice. This fork adds bounded reads and local semantic
+search:
 
 - **Ranged `get_document_content`** -- `offset` + `max_chars` windows, with honest
   `content_length` / `truncated` / `has_more` metadata.
@@ -28,6 +29,11 @@ way to ask for a slice. This fork adds bounded reads:
   before making it.
 - **Query resilience** -- an apostrophe in a search query is retried sanitized
   instead of returning a hard 400.
+- **Semantic search** -- `semantic_search` searches by meaning as well as by
+  words, fusing a local vector index with the lexical search above and
+  returning the same bounded-passage shape as `search_passages`. Optional,
+  local-only, and built explicitly with `sync_embeddings`; `embedding_status`
+  reports what the index holds. See [Semantic search setup](#semantic-search-setup).
 
 We also fix the build so it is idempotent (`tsc` no longer consumes its own
 `.d.ts` output on a rebuild). Upstream was unable to take this work, and agentic
@@ -97,6 +103,20 @@ Add these to your MCP config file:
 | `PAPERLESS_API_VERSION` | No | `9` | Paperless-ngx REST API version. `9` works on Paperless-ngx v2.x (recent) and v3.x. Paperless-ngx v3.0.0 dropped support for versions below `9`, so older defaults now return HTTP 406. If you see HTTP 406 errors, set this to a version your server supports. |
 | `PAPERLESS_MCP_UPLOAD_PATHS` | No | — | Colon-separated list of allowed directories for `file_path` uploads. **Recommended for security.** Example: `/var/uploads:/tmp/scans` |
 | `PAPERLESS_MCP_MAX_INLINE_CHARS` | No | `50000` | Hard cap on characters a single tool response may inline. Requests above the budget fail with the document size and a hint toward bounded reads instead of silently truncating or flooding context. |
+| `PAPERLESS_MCP_EMBEDDING_URL` *(Search)* | No | `http://127.0.0.1:11434` | Base URL of the local embedding server. Must be a literal loopback (`127.0.0.1`, `::1`) or RFC1918 address (`10.x`, `172.16-31.x`, `192.168.x`) — a DNS name is refused deliberately, because a name can resolve anywhere. Setting this (or any other `PAPERLESS_MCP_*` search variable) enables the semantic-search tools. |
+| `PAPERLESS_MCP_EMBEDDING_MODEL` *(Search)* | No | `nomic-embed-text` | Embedding model name, requested from the server above. Must produce 768-dimension vectors. |
+| `PAPERLESS_MCP_EMBEDDING_PREFIX_MODE` *(Search)* | No | `nomic` | One of `nomic`, `none`, `e5` — the prefix template applied to embedded text. The prefix is **baked into every stored vector at build time**, so a query built with a different mode returns quietly worse results rather than an error. A mismatch between the stored mode and the configured one is refused loudly; changing this requires a rebuild. |
+| `PAPERLESS_MCP_INDEX_DIR` *(Search)* | No | `~/.local/share/paperless-mcp/index` | Directory holding `index.db`. Outside your Paperless-ngx container by design. |
+| `PAPERLESS_MCP_MAX_CHUNKS` *(Search)* | No | `4000` | Maximum chunks stored per document. A longer document is truncated, and `embedding_status` reports how many were. |
+| `PAPERLESS_MCP_SYNC_BATCH_SIZE` *(Search)* | No | `16` | Accepted and range-checked (1–256), but **has no effect in this release**: embedding batches are fixed at 16 internally. |
+| `PAPERLESS_MCP_SYNC_INTERVAL_MS` *(Search)* | No | `0` (off) | Accepted and range-checked (0–86400000), but **no background timer runs in this release** — the value is read and nothing starts a schedule from it. Drive `sync_embeddings` from your client's scheduler instead. `0` means off. |
+
+Rows marked *(Search)* belong to the optional semantic-search feature: **setting any one of them
+enables the three search tools**, and each value you set is validated strictly rather than silently
+defaulted. Four of them also accept an unprefixed fallback name — `EMBEDDING_URL`, `EMBEDDING_MODEL`,
+`EMBEDDING_PREFIX_MODE`, `SYNC_INTERVAL_MS` — tried only when the prefixed form is unset. Prefer the
+prefixed names: the unprefixed ones are generic, so any other MCP server sharing the same process
+environment can collide with them.
 
 That's it! Now you can ask Claude to help you manage your Paperless-NGX documents.
 
@@ -783,6 +803,108 @@ delete_mail_rule({
   confirm: true
 })
 ```
+
+### Semantic Search
+
+Three optional tools that search the corpus by **meaning** as well as by words, using a local vector index fused with the corpus' own lexical (BM25) search. They register only when at least one of the search variables below is set — the seven marked *Search* in the Environment Variables table, not `PAPERLESS_MCP_MAX_INLINE_CHARS` or `PAPERLESS_MCP_UPLOAD_PATHS`. With none of the seven set, the server behaves exactly as before.
+
+Everything here runs against a local embedding server. There is no remote embedding path and no credential field — the endpoint must be a literal loopback or RFC 1918 address, so indexed text does not leave the host.
+
+#### semantic_search
+Search by meaning and by words together, returning bounded passages in the same shape as `search_passages`.
+
+Parameters:
+- query: What to search for, in natural language
+- limit (optional): Maximum passages to return (default 10, max 50)
+- window (optional): Characters per passage (default 800, range 200–4000)
+- correspondent, document_type, tag, created__date__gte, created__date__lte (optional): Same filters as `search_passages`. ⚠️ `storage_path` is accepted in the argument schema but **not applied** — passing it returns unfiltered results. Use `search_passages` when you need that filter.
+
+```typescript
+semantic_search({ query: "what did the inspector say about the roof" })
+// → {
+//     query, semantic: "ok", strong_match: true, total_hits: 4,
+//     passages: [{ id, title, score, matched, passage, offset, content_length }, ...]
+//   }
+```
+
+**Return shape.** `passages[]` mirrors `search_passages` — `id`, `title`, `score`, `passage`, `offset`, `content_length` — so a client that has learned one has learned the other. Two differences: `matched` is added, and `highlights` is always absent on this path (the vector side has no highlighted span and the lexical side returns a chunk rather than an offset, so the window is anchored on the first verbatim query term, falling back to the document head).
+
+**`matched`** is `"meaning"`, `"words"`, or `"both"`. It tells you whether to trust the hit or re-query lexically: `"words"` means the hit came from the lexical side and the vector side did not find it, so **do not read a words-only result as absence of a paraphrase** that is worded differently.
+
+**`total_hits`** is the number of distinct documents the ranking returned **before** your filter
+arguments were applied. At the current release it is therefore possible to see `total_hits` greater
+than `passages.length`: the extras were dropped by filtering, and the count says so rather than
+leaving the difference unexplained.
+
+**`strong_match`** is `true` when any returned passage cleared the similarity floor (0.45) or matched lexically. It is a **similarity (1 − distance)**, not a distance — higher is closer. A `false` here means everything returned is weak, and a re-query with different wording is worth trying.
+
+**Degradation contract.** The embedding server being down is an expected condition, not an error, so `semantic_search` never fails because of it. It returns the lexical results it can still produce, with `semantic: "unavailable"` and a `degraded_reason` naming the cause:
+
+```typescript
+// → { semantic: "unavailable", degraded_reason: "connect ECONNREFUSED 127.0.0.1:11434",
+//     strong_match: true, total_hits: 1, passages: [...] }
+```
+
+**A degraded call never returns a silent empty list.** `semantic` and `degraded_reason` carry the state instead, because `passages: []` alone cannot distinguish "nothing matched" from "half the search engine was missing". An empty list with `semantic: "ok"` **is** a real answer. If neither the lexical index nor the embedder is available at all, the tool returns an error rather than an empty list that would read as "no such document".
+
+⚠️ `semantic_search` requires the index to have been built first — see `sync_embeddings` and [Semantic search setup](#semantic-search-setup).
+
+#### embedding_status
+Report what the index actually holds. No parameters.
+
+```typescript
+embedding_status()
+// → {
+//     documents: 1240, chunks: 9678, dimensions: 768,
+//     model: "nomic-embed-text", prefix_mode: "nomic",
+//     last_sync: "2026-11-15T12:04:11.000Z",
+//     pending: 3, store_bytes: 148373504, truncated_documents: 2,
+//     index_path: "/home/you/.local/share/paperless-mcp/index/index.db"
+//   }
+```
+
+- `documents` / `chunks` — what is indexed now
+- `dimensions`, `model`, `prefix_mode` — what the index was **built** with; a mismatch against the running configuration is refused at query time
+- `last_sync` — the most recent metadata stamp written, or `null`
+- `pending` — remote document count minus indexed count. **`null` means the count could not be read**, which is not the same as `0`
+- `store_bytes` — size of `index.db` on disk, or `null` if the file does not exist yet
+- `truncated_documents` — documents that hit `PAPERLESS_MCP_MAX_CHUNKS` and lost their tail. **On a truncated document "not found" may be a false negative**, which is why this is reported
+- `open_error` — present only when the index could not be opened, and then the counts above are zeros
+
+Use this to tell "the index is empty" apart from "nothing matched".
+
+#### sync_embeddings
+Bring the index up to date with the corpus. Long-running on a first build.
+
+Parameters:
+- force (optional): Re-embed every document even if `modified` is unchanged. Only needed after a chunker or model change; a normal sync is incremental.
+
+```typescript
+sync_embeddings({})
+// → { added: 12, updated: 3, deleted: 0, metadataRefreshed: 4, failed: 0, deletedSkipped: false }
+```
+
+A normal sync fetches every document whose `modified` changed since the last run, re-chunks and re-embeds it, removes documents that no longer exist, and rebuilds metadata (tags, correspondent, document type) for documents whose metadata age exceeds 24 hours without the document itself being edited.
+
+- `failed` counts documents that errored individually and were skipped; `embedding_status` will still show them as pending
+- `deletedSkipped: true` means the remote list changed mid-run (row count disagreed with the reported count), so the delete step was skipped rather than risk removing live documents
+
+**An embedding outage aborts the run.** It stops rather than writing an index that is missing documents while claiming to be complete. Run `embedding_status` afterwards to confirm.
+
+⚠️ **`force: true` discards the existing vectors before it rebuilds them.** It works by deleting every stored document row so the diff sees the whole corpus as new, which means an interrupted or failed rebuild leaves you with no index to fall back on — not a stale one. Only use it when you know the embedding server is reachable, and confirm with `embedding_status` afterwards.
+
+## Semantic search setup
+
+Semantic search is entirely optional and off until you configure it.
+
+1. **Run a local embedding server.** The tools speak Ollama's `/api/embed` shape and default to `http://127.0.0.1:11434` with `nomic-embed-text`. Point `PAPERLESS_MCP_EMBEDDING_URL` at any loopback or RFC 1918 endpoint that serves the same API.
+2. **Set at least one `PAPERLESS_MCP_*` search variable** (see the Environment Variables table). Any one of them enables the tools; every value you set is validated strictly, and an invalid value refuses loudly rather than silently defaulting.
+3. **Build the index by calling `sync_embeddings`.** Nothing builds it in the background — there is no hidden timer. On a large corpus the first build takes tens of minutes; call `embedding_status` to watch `documents` and `chunks` climb.
+4. **Search.** `semantic_search` fuses the vector index with the corpus' lexical search.
+
+The index lives at `~/.local/share/paperless-mcp/index/index.db` by default, or wherever `PAPERLESS_MCP_INDEX_DIR` points. It is deliberately **outside** your Paperless-ngx container: it is derived data, it is regenerable by re-running `sync_embeddings`, and putting it inside the container would drag it into that container's backup scope.
+
+**Local embedding only.** The endpoint must be a literal loopback or RFC 1918 address; a DNS name is refused, because a name can resolve to anywhere and indexed text must not leave the host. There is no API-key field and no remote-embedding code path — the constraint cannot be relaxed by configuration.
 
 ## Error Handling
 

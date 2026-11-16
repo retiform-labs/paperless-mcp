@@ -39,9 +39,16 @@ const DB_PATH =
   process.env.PAPERLESS_MCP_INDEX_DB ||
   join(
     process.env.PAPERLESS_MCP_INDEX_DIR ||
-      join(process.env.HOME || "/REDACTED", ".local/share/paperless-mcp/index"),
+      join(process.env.HOME || ".", ".local/share/paperless-mcp/index"),
     "index.db"
   );
+
+// Results logs are COMMITTED, so the absolute home directory must never reach
+// one. Scrub at the point of writing; scrubbing afterwards leaked twice.
+const HOME_DIR = process.env.HOME || "";
+const displayPath = (p) =>
+  HOME_DIR && p.startsWith(HOME_DIR) ? "~" + p.slice(HOME_DIR.length) : p;
+
 const EMBED_URL = (process.env.PAPERLESS_MCP_EMBEDDING_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
 const EMBED_MODEL = process.env.PAPERLESS_MCP_EMBEDDING_MODEL || "nomic-embed-text";
 const EMBED_PATH = "/api/embeddings";
@@ -160,7 +167,7 @@ async function main() {
     );
     process.exit(1);
   }
-  console.log(`index    ${DB_PATH}`);
+  console.log(`index    ${displayPath(DB_PATH)}`);
   console.log(`embedder ${EMBED_URL} model=${EMBED_MODEL}`);
   console.log(`cases    ${cases.length}  depths ${DEPTHS.join(", ")}\n`);
 
@@ -327,7 +334,7 @@ async function main() {
   console.log(
     JSON.stringify(
       {
-        index: DB_PATH,
+        index: displayPath(DB_PATH),
         cases: cases.length,
         depths: DEPTHS,
         fuseK: FUSE_K,

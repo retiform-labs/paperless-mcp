@@ -35,9 +35,16 @@ const DB_PATH =
   process.env.PAPERLESS_MCP_INDEX_DB ||
   join(
     process.env.PAPERLESS_MCP_INDEX_DIR ||
-      join(process.env.HOME || "/REDACTED", ".local/share/paperless-mcp/index"),
+      join(process.env.HOME || ".", ".local/share/paperless-mcp/index"),
     "index.db"
   );
+
+// Results logs are COMMITTED (see .gitignore's `!eval/results/*.log`), so the
+// absolute home directory must never reach one. Scrub at the point of writing,
+// not afterwards -- the previous scrub-by-hand approach leaked twice.
+const HOME_DIR = process.env.HOME || "";
+const displayPath = (p) =>
+  HOME_DIR && p.startsWith(HOME_DIR) ? "~" + p.slice(HOME_DIR.length) : p;
 const EMBED_URL = (process.env.PAPERLESS_MCP_EMBEDDING_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
 const EMBED_MODEL = process.env.PAPERLESS_MCP_EMBEDDING_MODEL || "nomic-embed-text";
 
@@ -241,13 +248,21 @@ function rankOf(list, id) {
 // ---------------------------------------------------------------------------
 // THE STRATEGY TABLE. Order matters only for reporting; each row is independent.
 // ---------------------------------------------------------------------------
+// Strategy names are CONSTANTS and the reporting below indexes by them. Rename
+// a label without updating every lookup and the run dies mid-table with a
+// TypeError, as it did on 2026-11-16 -- which is the good failure (it refuses
+// rather than reporting from a partial map), but it is still avoidable.
+const MAX_OF_TWO = "single: max-of-two (floor)";
+const RRF_UPSTREAM = "rrf k=60 (upstream default)";
+const RRF_SHIPPED = "rrf k=10 (SHIPPED FORM)";
+
 const STRATEGIES = [
   ["single: vector-only",        (v, t) => listOnly(v)],
   ["single: lexical-only",       (v, t) => listOnly(t)],
-  ["single: max-of-two (floor)", (v, t) => singleArmMax(v, t)],
-  ["rrf k=60 (upstream default)", (v, t) => rrf(v, t, 60)],
+  [MAX_OF_TWO,                   (v, t) => singleArmMax(v, t)],
+  [RRF_UPSTREAM,                 (v, t) => rrf(v, t, 60)],
   ["rrf k=20",                   (v, t) => rrf(v, t, 20)],
-  ["rrf k=10 (SHIPPED FORM)",    (v, t) => rrf(v, t, 10)],
+  [RRF_SHIPPED,                  (v, t) => rrf(v, t, 10)],
   ["rrf k=5",                    (v, t) => rrf(v, t, 5)],
   ["rrf k=2",                    (v, t) => rrf(v, t, 2)],
   ["rrf k=1",                    (v, t) => rrf(v, t, 1)],
@@ -278,7 +293,7 @@ async function main() {
     console.error("REFUSING: build/ older than src/:", JSON.stringify(stale));
     process.exit(1);
   }
-  say(`index    ${DB_PATH}`);
+  say(`index    ${displayPath(DB_PATH)}`);
   say(`embedder ${EMBED_URL} model=${EMBED_MODEL}`);
   say(`cases    ${cases.length}   depths ${DEPTHS.join(", ")}   arm depth fixed at ${DEEP}\n`);
 
@@ -331,11 +346,11 @@ async function main() {
     rows.push({ id: c.id, control: !!c.control, query: c.query, armAtDepth, strategies: out });
 
     const mk = (r) => (r === null ? "  -" : String(r).padStart(3));
-    const f10 = out["rrf k=60 (SHIPPED FORM)"][10], f60 = out["rrf k=0"][10];
+    const f60 = out[RRF_UPSTREAM][10], f10 = out[RRF_SHIPPED][10];
     say(`[${String(i).padStart(2)}/${cases.length}] doc ${String(c.id).padStart(4)}` +
         `  vec ${DEPTHS.map((k) => mk(armAtDepth[k].vector)).join(" ")}` +
         `  lex ${DEPTHS.map((k) => mk(armAtDepth[k].lexical)).join(" ")}` +
-        `  rrf60@10 ${mk(f10)}  rrf0@10 ${mk(f60)}` +
+        `  rrf60@10 ${mk(f60)}  rrf10@10 ${mk(f10)}` +
         (c.control ? "   <- CONTROL" : ""));
   }
 
@@ -421,7 +436,7 @@ async function main() {
   const control = rows.find((r) => r.control);
   if (control) {
     say(`\nCONTROL doc ${control.id}: ` + STRATEGIES.slice(0, 3).map(([n]) => `${n.split(": ")[1]}=${control.strategies[n][10]}`).join(" ") +
-        `  rrf60=${control.strategies["rrf k=60 (SHIPPED FORM)"][10]}`);
+        `  rrf60=${control.strategies[RRF_UPSTREAM][10]}  rrf10=${control.strategies[RRF_SHIPPED][10]}`);
   }
 
   // ---- per-case detail for the @10 discriminating cases --------------------
@@ -433,8 +448,8 @@ async function main() {
       String(r.id).padEnd(6),
       fmt(r.armAtDepth[10].vector).padStart(5),
       fmt(r.armAtDepth[10].lexical).padStart(5),
-      fmt(r.strategies["single: max-of-two (floor)"][10]).padStart(5),
-      fmt(r.strategies["rrf k=60 (SHIPPED FORM)"][10]).padStart(6),
+      fmt(r.strategies[MAX_OF_TWO][10]).padStart(5),
+      fmt(r.strategies[RRF_UPSTREAM][10]).padStart(6),
       fmt(r.strategies["rrf k=0"][10]).padStart(5),
       fmt(r.strategies["minmax sum"][10]).padStart(5),
       fmt(r.strategies["zscore sum missing=min"][10]).padStart(5),
@@ -445,7 +460,7 @@ async function main() {
   // ---- JSON ---------------------------------------------------------------
   say("\n=== JSON ===");
   say(JSON.stringify({
-    index: DB_PATH, cases: rows.length, depths: DEPTHS, armDepth: DEEP,
+    index: displayPath(DB_PATH), cases: rows.length, depths: DEPTHS, armDepth: DEEP,
     validation: { membershipChecks: memChecks, membershipMismatch: memMismatch, detail: memDetail },
     table,
     perCase: rows.map((r) => ({ id: r.id, control: r.control, armAtDepth: r.armAtDepth, strategies: r.strategies })),

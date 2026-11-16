@@ -11,7 +11,7 @@
 // tool-layer overhead cannot contaminate the retrieval number:
 //   vector  - Ollama embedding -> vec_chunks kNN          (store.vectorHits)
 //   lexical - FTS5 BM25                                     (store.textHits)
-//   fused   - reciprocal rank fusion k=60                   (fuse)
+//   fused   - reciprocal rank fusion at the SHIPPED k       (fuse, rank.js)
 //
 // WHAT k MEANS HERE: k is DISTINCT DOCUMENTS RETURNED, not kNN candidates.
 // store.vectorHits() does per-document dedupe and widens its candidate pool
@@ -25,11 +25,15 @@ import { readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SearchIndex } from "../build/search/store.js";
-import { fuse } from "../build/search/rank.js";
+import { fuse, DEFAULT_FUSE_K } from "../build/search/rank.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEPTHS = [10, 50, 200];
-const FUSE_K = 60;
+// Read the SHIPPED constant rather than restating it. A harness that hard-codes
+// its own copy of k measures a form that may no longer be the one in production
+// -- and it would keep doing so silently, which is precisely the false-premise
+// class this runner already refuses to score on.
+const FUSE_K = DEFAULT_FUSE_K;
 
 const DB_PATH =
   process.env.PAPERLESS_MCP_INDEX_DB ||

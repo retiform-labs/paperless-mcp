@@ -27,7 +27,31 @@ export interface Fused {
   bestSimilarity: number | null;
 }
 
-export function fuse(vector: Hit[], text: Hit[], k = 60): Fused[] {
+// `k` is the RRF dampening constant: it settles how much a document's rank
+// matters relative to how many lists agree about it. A document both arms hold
+// at rank D scores 2/(k+D), while a document only ONE arm found at rank 1
+// scores 1/(k+1). So a dual-arm document outranks a perfect single-arm hit for
+// every D < k+2.
+//
+// At the upstream default of k=60 that crossover sits at D=62 -- meaning any
+// document both arms happened to return in their top 62 outranked a document
+// one arm had ranked FIRST. k=60 is the figure from the original RRF paper,
+// where candidate lists ran to thousands; it was inherited here verbatim from
+// jaimemachado/paperless-mcp and never tuned for a corpus whose arms return at
+// most a few hundred candidates and whose top 10 is what a caller reads.
+//
+// Measured on the live index (eval/bakeoff.mjs, 20 ground-truthed cases,
+// 24 strategies, reproducible run to run): k=60 scores 15/20 at depth 10 while
+// every k of 10 or below scores 18/20. Two cases carry the whole difference --
+// a document ONE arm ranked first fell to rank 11 and to rank 52 under k=60.
+// Which value below 60 is best is inside this fixture's noise (10, 5, 2, 1 and
+// 0 all tie at 18/20), so k=10 is chosen for being the smallest change that
+// removes the pathology while keeping rank order meaningful across the pool
+// rather than collapsing it to bare reciprocal rank. Do not read 18 as "the
+// best available number"; read it as "k no longer fights the ranking".
+export const DEFAULT_FUSE_K = 10;
+
+export function fuse(vector: Hit[], text: Hit[], k = DEFAULT_FUSE_K): Fused[] {
   const byDocument = new Map<
     number,
     { score: number; vector?: Hit; text?: Hit }

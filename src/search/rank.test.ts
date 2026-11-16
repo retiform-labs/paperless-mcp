@@ -11,10 +11,13 @@ function hit(documentId: number, position: number, score: number): Hit {
   };
 }
 
-// Reciproc rank fusion at k=60: 1/61 = 0.016393442622950821, 1/62 = 1/62.
-const K60_RANK1 = 1 / 61;
-const K60_RANK2 = 1 / 62;
-const K60_RANK3 = 1 / 63;
+// Reciprocal rank fusion at the default k=10: 1/11, 1/12, 1/13.
+// These are written as arithmetic rather than decimals on purpose -- the point
+// of these constants is to pin the FORMULA, so a change to k must show up here
+// as a failing test rather than silently re-baselining.
+const K_RANK1 = 1 / 11;
+const K_RANK2 = 1 / 12;
+const K_RANK3 = 1 / 13;
 
 test("a vector-only hit is retained with matched meaning", () => {
   const result = fuse([hit(1, 0, 0.9)], []);
@@ -39,9 +42,9 @@ test("a document in both lists outranks one in only one", () => {
   assert.equal(result[1].matched, "meaning");
 });
 
-test("the arithmetic is the hand-computed k=60 sum", () => {
-  // Doc 1: rank 2 in vector, rank 1 in text  -> 1/62 + 1/61
-  // Doc 2: rank 1 in vector only             -> 1/61
+test("the arithmetic is the hand-computed default-k sum", () => {
+  // Doc 1: rank 2 in vector, rank 1 in text  -> 1/12 + 1/11
+  // Doc 2: rank 1 in vector only             -> 1/11
   const vector = [hit(2, 0, 0.95), hit(1, 5, 0.90)];
   const text = [hit(1, 7, 1.2)];
 
@@ -50,42 +53,44 @@ test("the arithmetic is the hand-computed k=60 sum", () => {
   assert.equal(result.length, 2);
   const doc1 = result.find((r) => r.documentId === 1)!;
   const doc2 = result.find((r) => r.documentId === 2)!;
-  assert.equal(doc1.score, K60_RANK2 + K60_RANK1);
-  assert.equal(doc2.score, K60_RANK1);
+  assert.equal(doc1.score, K_RANK2 + K_RANK1);
+  assert.equal(doc2.score, K_RANK1);
   // And the fused doc must actually be ahead, not merely present.
   assert.ok(doc1.score > doc2.score);
 });
 
 test("a single-list hit scores exactly 1/(k+rank) at default k", () => {
-  assert.equal(fuse([hit(1, 0, 0.9)], [])[0].score, K60_RANK1);
-  assert.equal(fuse([hit(1, 0, 0.9)], [], 10)[0].score, 1 / 11);
+  assert.equal(fuse([hit(1, 0, 0.9)], [])[0].score, K_RANK1);
+  // The k=60 figure is no longer the default, but it must still be reachable:
+  // the parameter is part of the contract, not a vestige.
+  assert.equal(fuse([hit(1, 0, 0.9)], [], 60)[0].score, 1 / 61);
 });
 
 test("a document with several hits in one list counts only its best rank", () => {
   const result = fuse([hit(1, 0, 0.9), hit(1, 1, 0.8), hit(1, 2, 0.7)], [hit(2, 0, 1.0)]);
 
   const doc1 = result.find((r) => r.documentId === 1)!;
-  assert.equal(doc1.score, K60_RANK1);
+  assert.equal(doc1.score, K_RANK1);
 });
 
 test("best rank is used on the text side too, not just the vector side", () => {
   // Doc 1 appears 3 times in the TEXT list at ranks 2, 3 and 4, and not at all
-  // in vector. Only its best rank (2) counts: 1/62. If the code took the last
-  // rank it would score 1/64 instead.
+  // in vector. Only its best rank (2) counts: 1/12. If the code took the last
+  // rank it would score 1/14 instead.
   const text = [hit(9, 0, 1.0), hit(1, 1, 0.9), hit(1, 2, 0.8), hit(1, 3, 0.7)];
 
   const result = fuse([], text);
 
   const doc1 = result.find((r) => r.documentId === 1)!;
-  assert.equal(doc1.score, K60_RANK2);
+  assert.equal(doc1.score, K_RANK2);
   assert.equal(doc1.matched, "words");
 });
 
 test("three documents: both beats meaning-only beats words-only", () => {
   // vector: [doc3, doc1]   text: [doc1, doc2]
-  // doc1 -> 1/62 + 1/61  (both)
-  // doc3 -> 1/61         (meaning)
-  // doc2 -> 1/62         (words)
+  // doc1 -> 1/12 + 1/11  (both)
+  // doc3 -> 1/11         (meaning)
+  // doc2 -> 1/12         (words)
   const vector = [hit(3, 0, 0.9), hit(1, 1, 0.8)];
   const text = [hit(1, 2, 1.1), hit(2, 3, 1.0)];
 
@@ -99,9 +104,9 @@ test("three documents: both beats meaning-only beats words-only", () => {
       [2, "words"],
     ]
   );
-  assert.equal(result[0].score, K60_RANK2 + K60_RANK1);
-  assert.equal(result[1].score, K60_RANK1);
-  assert.equal(result[2].score, K60_RANK2);
+  assert.equal(result[0].score, K_RANK2 + K_RANK1);
+  assert.equal(result[1].score, K_RANK1);
+  assert.equal(result[2].score, K_RANK2);
 });
 
 test("matched is both only when the document genuinely appears in both lists", () => {

@@ -1,6 +1,6 @@
 === paperless-mcp search acceptance harness ===
 
-index    /REDACTED/.local/share/paperless-mcp/index/index.db
+index    ~/.local/share/paperless-mcp/index/index.db
 embedder http://127.0.0.1:11434 model=nomic-embed-text
 cases    20  depths 10, 50, 200
 
@@ -48,7 +48,7 @@ fused (arms fixed at 200)            14/19  (74%)     17/19  (89%)    19/19  (10
 
 === JSON ===
 {
-  "index": "/REDACTED/.local/share/paperless-mcp/index/index.db",
+  "index": "~/.local/share/paperless-mcp/index/index.db",
   "cases": 20,
   "depths": [
     10,

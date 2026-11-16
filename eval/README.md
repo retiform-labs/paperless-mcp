@@ -4,7 +4,7 @@ Measures recall of the three retrieval arms against the live index, **per arm an
 per depth**, and refuses to score when a case's premise is false.
 
 ```bash
-set -a && . /REDACTED/.paperless-index-build.env && set +a
+set -a && . "$HOME/.paperless-index-build.env" && set +a
 npm run eval
 # or: node eval/run.mjs
 ```
@@ -35,7 +35,7 @@ pass. **Recall is checked by a human running the command below on a machine with
 the index, and by comparing against the committed baselines.**
 
 ```bash
-set -a && . /REDACTED/.paperless-index-build.env && set +a
+set -a && . "$HOME/.paperless-index-build.env" && set +a
 npm run build          # the harness scores the BUILD, so it must be current
 npm run eval
 ```

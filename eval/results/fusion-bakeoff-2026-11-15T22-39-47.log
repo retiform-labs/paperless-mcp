@@ -1,5 +1,5 @@
 === fusion bake-off -- paperless-mcp ===
-index    /REDACTED/.local/share/paperless-mcp/index/index.db
+index    ~/.local/share/paperless-mcp/index/index.db
 embedder http://127.0.0.1:11434 model=nomic-embed-text
 cases    20   depths 10, 50, 200   arm depth fixed at 200
 
@@ -109,7 +109,7 @@ doc      vec   lex   max  rrf60  rrf0    mm  zmin   ilv
 
 === JSON ===
 {
- "index": "/REDACTED/.local/share/paperless-mcp/index/index.db",
+ "index": "~/.local/share/paperless-mcp/index/index.db",
  "cases": 20,
  "depths": [
   10,

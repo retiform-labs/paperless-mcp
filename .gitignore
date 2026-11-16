@@ -45,3 +45,12 @@ temp/
 # Regenerated automatically by `activate_project` on each machine, so it is
 # per-machine configuration rather than project source.
 .serena/
+
+# ---- private eval fixtures -------------------------------------------------
+# These name our own corpus: restricted-practice terms and document titles from
+# a private library. The SCHEMA is public (see eval/queries.example.json); the
+# CASES are not. `run.mjs` and `bakeoff.mjs` read eval/queries.json, so an
+# operator supplies their own copy from the example.
+eval/queries.json
+eval/live.mjs
+live3.mjs

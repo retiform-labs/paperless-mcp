@@ -449,17 +449,166 @@ describe("loadDocumentMetadata — an omitted document is never invented", () =>
  * end to end?
  */
 describe("the budget holds end to end", () => {
-  test("a MAX_LIMIT / max-window search returns a result under the ceiling", () => {
-    // The pure arithmetic, stated as the invariant rather than a table: whatever
-    // the caller asks for, the passage COUNT that will be attempted must fit.
-    for (const window of [200, 800, 2000, 4000]) {
-      const limit = budgetedLimit(MAX_LIMIT, window);
-      const worst = limit * (window + 200);
+  /**
+   * ⚠️ THIS STARTED AS A PURE `budgetedLimit` ARITHMETIC TEST AND THAT WAS NOT
+   * GOOD ENOUGH. It survived a mutation of `RESULT_BUDGET_FRACTION` from 0.9 to
+   * 1.0 with 11/11 green -- correctly, because `limit * (window + overhead)`
+   * still fits inside the ceiling at fraction 1.0. A test that duplicates
+   * `searchBudget.test.ts` while being titled "end to end" is a claim, not a
+   * test. It now runs a REAL search whose result is measured as serialised
+   * bytes, which is the only thing `fitResultToBudget` can be judged on.
+   */
+  test("a MAX_LIMIT / max-window search returns a body under MAX_RESULT_CHARS", async () => {
+    // 50 documents so the caller's MAX_LIMIT is actually reachable: with fewer,
+    // the limit would be bounded by the corpus rather than by the budget and
+    // the test would prove nothing about the budget.
+    const seeds = Array.from({ length: MAX_LIMIT }, (_, i) => ({
+      id: i + 1,
+      title: `Doc ${i + 1}`,
+      // Long text so each passage really fills its 4000-char window.
+      indexText: `${"filler ".repeat(400)} prana winds ${"tail ".repeat(400)}`,
+    }));
+    const { context, index } = buildContext(seeds);
+    try {
+      const result = await runSemanticSearch(context, "prana", {
+        limit: MAX_LIMIT,
+        window: 4000,
+        loadDocuments: async () =>
+          new Map(seeds.map((seed) => [seed.id, metadataOnly(seed.id, seed.title)])),
+        loadText: (hits) => {
+          const text = new Map<number, string>();
+          for (const id of new Set(hits.map((hit) => hit.documentId))) {
+            text.set(
+              id,
+              index
+                .chunksFor(id)
+                .filter((chunk) => chunk.kind === "content")
+                .map((chunk) => chunk.text)
+                .join("")
+            );
+          }
+          return text;
+        },
+      });
+
+      const bytes = JSON.stringify(result).length;
       assert.ok(
-        worst <= MAX_RESULT_CHARS,
-        `window ${window}: ${limit} passages x ${window}+200 = ${worst} exceeds ${MAX_RESULT_CHARS}`
+        bytes <= MAX_RESULT_CHARS,
+        `a maximal call returned ${bytes} chars, over the ${MAX_RESULT_CHARS} ceiling`
       );
-      assert.ok(limit >= 1, `window ${window} must still permit one passage`);
+      // The request was for 50 x 4000; neither the count nor the bytes may
+      // honour it, and whichever was cut must be stated rather than silent.
+      assert.ok(
+        result.passages.length < MAX_LIMIT,
+        "50 passages of 4000 chars cannot fit; the count must have been reduced"
+      );
+      assert.ok(result.passages.length >= 1, "at least one passage must survive");
+    } finally {
+      index.close();
+    }
+  });
+
+  test("the passage COUNT is what budgetedLimit promised, not the raw limit", async () => {
+    // Ties the two enforcements together: the number of passages produced must
+    // equal what budgetedLimit authorised, so a caller can predict the shape.
+    const seeds = Array.from({ length: MAX_LIMIT }, (_, i) => ({
+      id: i + 1,
+      title: `Doc ${i + 1}`,
+      indexText: `${"filler ".repeat(400)} prana winds ${"tail ".repeat(400)}`,
+    }));
+    const { context, index } = buildContext(seeds);
+    try {
+      const result = await runSemanticSearch(context, "prana", {
+        limit: MAX_LIMIT,
+        window: 4000,
+        loadDocuments: async () =>
+          new Map(seeds.map((seed) => [seed.id, metadataOnly(seed.id, seed.title)])),
+        loadText: (hits) => {
+          const text = new Map<number, string>();
+          for (const id of new Set(hits.map((hit) => hit.documentId))) {
+            text.set(
+              id,
+              index
+                .chunksFor(id)
+                .filter((chunk) => chunk.kind === "content")
+                .map((chunk) => chunk.text)
+                .join("")
+            );
+          }
+          return text;
+        },
+      });
+
+      const promised = budgetedLimit(MAX_LIMIT, 4000);
+      assert.ok(
+        result.passages.length <= promised,
+        `${result.passages.length} passages exceeds the ${promised} the budget authorised`
+      );
+      assert.equal(
+        result.trimmed,
+        undefined,
+        "the count must already fit, so fitResultToBudget must have nothing to trim"
+      );
+    } finally {
+      index.close();
+    }
+  });
+
+  /**
+   * ⚠️ THE CASE `budgetedLimit` CANNOT SEE, AND THEREFORE THE ONLY REASON
+   * `fitResultToBudget` IS NOT DECORATION.
+   *
+   * `budgetedLimit` counts `limit x (window + PASSAGE_OVERHEAD_CHARS)` and
+   * assumes 200 chars of scaffolding per passage. Real titles are unbounded, so
+   * a result can have the RIGHT passage count and still blow the ceiling on
+   * envelope bytes alone. Removing `fitResultToBudget` from the return path left
+   * this suite 12/12 green until this test existed -- measured, then written.
+   */
+  test("LONG TITLES blow the byte ceiling while the passage count still fits", async () => {
+    // budgetedLimit(50, 4000) is 4. Four 4000-char passages plus 200 chars of
+    // scaffolding each is 16,800 -- comfortably inside 20,000. Give each
+    // document a 2,000-char title and the envelope adds 8,000 more.
+    const longTitle = "T".repeat(2000);
+    const seeds = Array.from({ length: MAX_LIMIT }, (_, i) => ({
+      id: i + 1,
+      title: `${longTitle}${i}`,
+      indexText: `${"filler ".repeat(400)} prana winds ${"tail ".repeat(400)}`,
+    }));
+    const { context, index } = buildContext(seeds);
+    try {
+      const result = await runSemanticSearch(context, "prana", {
+        limit: MAX_LIMIT,
+        window: 4000,
+        loadDocuments: async () =>
+          new Map(seeds.map((seed) => [seed.id, metadataOnly(seed.id, seed.title)])),
+        loadText: (hits) => {
+          const text = new Map<number, string>();
+          for (const id of new Set(hits.map((hit) => hit.documentId))) {
+            text.set(
+              id,
+              index
+                .chunksFor(id)
+                .filter((chunk) => chunk.kind === "content")
+                .map((chunk) => chunk.text)
+                .join("")
+            );
+          }
+          return text;
+        },
+      });
+
+      const bytes = JSON.stringify(result).length;
+      assert.ok(
+        bytes <= MAX_RESULT_CHARS,
+        `${bytes} chars exceeds ${MAX_RESULT_CHARS} -- budgetedLimit cannot see title bytes`
+      );
+      // And the reduction must be REPORTED: a caller that asked for 4 and got
+      // fewer has to be able to tell that from "the corpus only had 2".
+      assert.ok(result.trimmed, "a byte-driven reduction must set `trimmed`");
+      assert.equal(result.trimmed.reason, "result_size");
+      assert.ok(result.trimmed.dropped > 0, "it must report how many it dropped");
+    } finally {
+      index.close();
     }
   });
 });

@@ -40,3 +40,8 @@ Thumbs.db
 
 # Devfiles / Temp stuff
 temp/
+
+# Serena (MCP code-intelligence tool) local project state.
+# Regenerated automatically by `activate_project` on each machine, so it is
+# per-machine configuration rather than project source.
+.serena/

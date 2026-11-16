@@ -833,7 +833,11 @@ semantic_search({ query: "what did the inspector say about the roof" })
 //   }
 ```
 
-**Return shape.** `passages[]` mirrors `search_passages` — `id`, `title`, `score`, `passage`, `offset`, `content_length` — so a client that has learned one has learned the other. Two differences: `matched` is added, and `highlights` is always absent on this path (the vector side has no highlighted span and the lexical side returns a chunk rather than an offset, so the window is anchored on the first verbatim query term, falling back to the document head).
+**Return shape.** `passages[]` mirrors `search_passages` — `id`, `title`, `score`, `passage`, `offset`, `content_length` — so a client that has learned one has learned the other. `matched` is added, saying whether the hit came from meaning, words, or both.
+
+**Where the window anchors.** On the **longest matching query term**, which is the cheap correct proxy for the most *distinctive* one. It used to anchor on the first term in query order, and English queries open with articles — so `"the practice of a wrathful deity with a lion head"` anchored on `"the"` at character 3 and the window landed at the document head. Longest-match fixes that. If no query term appears in the document at all, the window falls back to offset 0 and reports no anchoring term; that is a deliberate, honest head window rather than a fabricated match.
+
+⚠️ **`offset` is in the RECONSTRUCTED text space, not the raw file.** The passage is rebuilt by joining the document's chunks, so chunk *p* begins at `(p−1)×1800`. `offset` and `content_length` address that reconstruction. The response carries `offset_space` saying so — do not feed these offsets to a raw-file byte reader.
 
 **`matched`** is `"meaning"`, `"words"`, or `"both"`. It tells you whether to trust the hit or re-query lexically: `"words"` means the hit came from the lexical side and the vector side did not find it, so **do not read a words-only result as absence of a paraphrase** that is worded differently.
 

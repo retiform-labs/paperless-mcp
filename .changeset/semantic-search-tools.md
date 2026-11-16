@@ -13,6 +13,44 @@ from the vector side, the lexical side, or both; a `"words"` hit is a lexical
 match the vector side did not find, so it should not be read as absence of a
 paraphrase.
 
+`score` is a **reciprocal-rank-fusion sum, not a similarity** — `Σ 1/(k + bestRank)`
+across the arms that returned the document. With two retrievers the maximum is
+`2/(k+1)`, so the ceiling is a property of the fusion constant rather than of the
+engine, and it is **not** a 0–1 similarity scale. Read rank order, not magnitude.
+Both the package README and the tool's KDoc say so, because a bare `score: 0.18`
+with no explanation is worse than no score at all.
+
+### Bounded results
+
+`semantic_search` never returns whole documents and never floods a caller. Each
+passage is a window (`window`, default 800, range 200–4000) around the hit, and
+the **total serialised result** is capped at 20,000 characters. A result that
+would exceed that is cut and says exactly what was cut:
+
+```typescript
+trimmed?: { reason: "result_size"; dropped: number; limit_chars: 20000; query_truncated?: boolean }
+```
+
+The bound covers the echoed `query` as well as the passages (`query_truncated`
+announces the former), because a caller echoing a very long query was otherwise
+the way this overflowed. A trimmed response is a real answer — the passages it
+kept are the highest-ranked ones.
+
+### How the passage window is anchored
+
+Each window is placed on the **rarest matching query term**, measured as that
+term's chunk count across the index and computed once per request, with term
+length only as a tiebreak. Two earlier heuristics were wrong: anchoring on the
+first term in query order landed on "the" at character 3 for English queries, and
+anchoring on the longest term then picked a common long word over a short
+distinctive one (`doctor`, 1,903 chunks, over `ankle`, 808). Rarity matched a
+human read in 3 of 3 probes where length matched 0 of 3.
+
+⚠️ **`offset` addresses the RECONSTRUCTED text, not the raw file** — passages are
+rebuilt by joining the document's chunks. Each passage carries `offset_space`
+(`"normalized"` on this path, `"document"` when it fell back to the API's own
+content) so a caller can tell which space it is in without assuming.
+
 `embedding_status` reports what the index actually holds — document and chunk
 counts, the dimensions/model/prefix mode it was built with, the last sync stamp,
 how many documents are pending, index size on disk, and how many documents were

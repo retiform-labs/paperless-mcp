@@ -188,8 +188,23 @@ describe("getMaxInlineChars", () => {
     delete process.env[KEY];
   });
 
-  test("defaults to 50000 without configuration", () => {
+  // Asserts against the CONSTANT, not a literal, so a deliberate change to the
+  // default does not make this red. The previous name said "50000" while the
+  // assertion was already constant-relative -- a name that lies about its own
+  // body is a surface, the same class as a stale doc comment.
+  test("defaults to DEFAULT_MAX_INLINE_CHARS without configuration", () => {
     assert.equal(getMaxInlineChars(), DEFAULT_MAX_INLINE_CHARS);
+  });
+
+  // The default is a CEILING OUR CONSUMER ALSO ENFORCES, not a free choice: a
+  // budget above the reader's is a budget that gets applied downstream by
+  // truncation the caller cannot detect. Pinned so lowering it further, or
+  // raising it back, is a deliberate act with a failing test attached.
+  test("the inline default does not exceed the client truncation ceiling", () => {
+    assert.ok(
+      DEFAULT_MAX_INLINE_CHARS <= 20000,
+      `inline budget ${DEFAULT_MAX_INLINE_CHARS} exceeds the 20000-char ceiling most MCP clients apply`
+    );
   });
 
   test("reads the environment at call time", () => {

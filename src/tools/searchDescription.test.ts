@@ -63,14 +63,37 @@ test("the README does not claim highlights is always absent", () => {
 // "first verbatim query term" -- a doc correct in the copy a CLIENT reads and
 // wrong in the copy a MAINTAINER reads. A pin test that checks one surface is
 // a pin test that confirms the surface you happened to open.
-test("every surface describes the length-based anchor, not query order", () => {
+// ⚠️ THIS TEST OUTLIVED ITS MECHANISM, TWICE, AND THE SECOND TIME IT WAS PINNING
+// A FALSEHOOD. Version 1 checked the README only and missed `search.ts`'s own
+// JSDoc. Version 2 checked all three surfaces and demanded the word "longest" --
+// correct while length was the heuristic, and WRONG the moment `5cb3492` moved
+// the anchor to RARITY. It stayed green by certifying a claim the code no longer
+// made, which is worse than being red: a stale doc the suite actively endorses.
+//
+// The durable form is to assert the PROPERTY the code actually implements, and
+// to forbid the retired wordings -- so a future heuristic change fails this test
+// instead of being silently blessed by it.
+test("each path describes the anchor it actually implements, and neither describes query order", () => {
+  // Query order is retired EVERYWHERE -- it anchored English queries on "the".
+  // Length and rarity, by contrast, are BOTH live, on different tools: this is
+  // not one heuristic documented twice, and collapsing them would "fix" one
+  // correct surface into a false one. (It did: I rewrote README's search_passages
+  // paragraph to say rarity, and search_passages still walks longest-first
+  // because it has no index access and never will.)
   for (const [name, text] of [["search.ts", searchSrc], ["documents.ts", docsSrc], ["README.md", readme]] as const) {
     assert.ok(
       !/first verbatim (query )?term/i.test(text),
       `${name} still describes the retired query-order anchor`
     );
   }
+  // semantic_search: rarity, because it holds the index.
+  assert.match(searchSrc, /rarityOf|termRarity/);
+  assert.match(readme, /rarest matching query term/i);
+  // search_passages: length, because it does not -- and it must SAY so.
+  assert.match(docsSrc, /sort\(\(a, b\) => b\.length - a\.length\)/);
   assert.match(readme, /longest matching query term/i);
+  // And the divergence must be disclosed, not left for a reader to discover.
+  assert.match(readme, /rank their fallback anchor differently, on purpose/i);
 });
 
 

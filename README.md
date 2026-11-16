@@ -102,7 +102,7 @@ Add these to your MCP config file:
 | `PAPERLESS_PUBLIC_URL` | No | `PAPERLESS_URL` | Public-facing URL for document links |
 | `PAPERLESS_API_VERSION` | No | `9` | Paperless-ngx REST API version. `9` works on Paperless-ngx v2.x (recent) and v3.x. Paperless-ngx v3.0.0 dropped support for versions below `9`, so older defaults now return HTTP 406. If you see HTTP 406 errors, set this to a version your server supports. |
 | `PAPERLESS_MCP_UPLOAD_PATHS` | No | — | Colon-separated list of allowed directories for `file_path` uploads. **Recommended for security.** Example: `/var/uploads:/tmp/scans` |
-| `PAPERLESS_MCP_MAX_INLINE_CHARS` | No | `50000` | Hard cap on characters a single tool response may inline. Requests above the budget fail with the document size and a hint toward bounded reads instead of silently truncating or flooding context. |
+| `PAPERLESS_MCP_MAX_INLINE_CHARS` | No | `20000` | Hard cap on characters a single tool response may inline. Requests above the budget fail with the document size and a hint toward bounded reads instead of silently truncating or flooding context. The default matches the 20,000-char ceiling most MCP clients apply to a tool result; setting it higher means the response is built whole and then truncated downstream without your caller being able to tell. |
 | `PAPERLESS_MCP_EMBEDDING_URL` *(Search)* | No | `http://127.0.0.1:11434` | Base URL of an OpenAI-compatible `/embeddings` endpoint. Either reply envelope is accepted — `{embeddings: [[...]]}` (Ollama native) or `{data: [{embedding: [...]}]}` (OpenAI-compatible) — so no setting tells the client which shape to expect. Setting this (or any other `PAPERLESS_MCP_*` search variable) enables the semantic-search tools. |
 | `PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY` *(Search)* | No | `false` | When `true`, the endpoint must be a literal loopback (`127.0.0.1`, `::1`) or RFC1918 address (`10.x`, `172.16-31.x`, `192.168.x`); a DNS name is refused, because a name can resolve anywhere. Set this if indexed text must not leave your network. Off by default so a hosted provider works without a policy you did not ask for. |
 | `PAPERLESS_MCP_EMBEDDING_API_KEY` *(Search)* | No | — | Sent as `Authorization: Bearer <key>`. Never logged, never included in an error message, and held in a private field so it does not appear in a serialised client object. Leaving it unset sends no authorization header at all. |
@@ -271,10 +271,12 @@ get_document_content({ id: 123, offset: 8000, max_chars: 8000 })
 // → next window
 ```
 
-Requests above the inline budget (`PAPERLESS_MCP_MAX_INLINE_CHARS`, default 50000) fail with the document size and a hint toward offset reads or the `download_document` resource — never a silent slice, never an unbounded return. The response always carries `content_length`, `truncated`, and `has_more` so callers can page deterministically.
+Requests above the inline budget (`PAPERLESS_MCP_MAX_INLINE_CHARS`, default 20000) fail with the document size and a hint toward offset reads or the `download_document` resource — never a silent slice, never an unbounded return. The response always carries `content_length`, `truncated`, and `has_more` so callers can page deterministically.
 
 #### search_passages
 Search documents full-text and return **bounded text passages around each hit** instead of whole documents. Each window is anchored on the server's own highlighted phrase (falling back to the **longest matching query term**, then the document head), so the returned passage contains the actual hit even when the search index stemmed a word variant that does not appear verbatim in the stored text. Returns the document id, title, score, offset, `content_length`, and the highlighted snippet.
+
+⚠️ **This tool and `semantic_search` rank their fallback anchor differently, on purpose.** `semantic_search` orders candidates by corpus **rarity**, because it holds the index. This tool has no index access and never will, so it uses term **length** as its proxy. When the server's highlight resolves — which is the common case here — neither fallback runs and the two agree exactly.
 
 Queries that the server rejects with an opaque HTTP 400 (django-watson rejects some syntactically valid queries, notably those containing apostrophes) are retried once with a defensively rewritten query — apostrophes and stray quotes removed; structured filter values are never rewritten. Responses from a rewritten retry carry `query_sanitized: true`. Persistent failures throw a structured error naming every attempted query.
 
@@ -835,7 +837,15 @@ semantic_search({ query: "what did the inspector say about the roof" })
 
 **Return shape.** `passages[]` mirrors `search_passages` — `id`, `title`, `score`, `passage`, `offset`, `content_length` — so a client that has learned one has learned the other. `matched` is added, saying whether the hit came from meaning, words, or both.
 
-**Where the window anchors.** On the **longest matching query term**, which is the cheap correct proxy for the most *distinctive* one. It used to anchor on the first term in query order, and English queries open with articles — so `"the practice of a wrathful deity with a lion head"` anchored on `"the"` at character 3 and the window landed at the document head. Longest-match fixes that. If no query term appears in the document at all, the window falls back to offset 0 and reports no anchoring term; that is a deliberate, honest head window rather than a fabricated match.
+⚠️ **`score` is a reciprocal-rank-fusion sum, not a similarity.** Do not read it against a 0–1 scale, and do not threshold it. For each list a document appears in it contributes `1 / (k + rank)` using its best rank there, so with two retrievers the maximum is `2 / (k + 1)` where `k` is the fusion constant:
+
+```
+score = Σ_arms  1 / (k + bestRank_in_that_arm)
+```
+
+**The ceiling is a function of `k` and moves when `k` moves** — it is `2/11 ≈ 0.182` at the shipped `k = 10`. A score near the top means "both retrievers ranked this document first", which is the strongest agreement this scale can express; a score of `0.05` is not "5% relevant", it is a lower position in the same sum. Rank order is the meaning; the magnitude is not portable between versions. If you need a relevance judgement, use `matched` (which halves found it) and the passages themselves.
+
+**Where the window anchors.** On the **rarest matching query term**, measured as that term's chunk count across the index and computed once per request. Length is only the tiebreak. It went through two earlier heuristics, and both were wrong in instructive ways: it first anchored on the first term in query order, and English queries open with articles — `"the practice of a wrathful deity with a lion head"` anchored on `"the"` at character 3 and the window landed at the document head. Anchoring on the *longest* term fixed that case and then failed the opposite one: `"doctor"` is longer than `"ankle"` but far commoner (measured 1,903 chunks against 808), so a query containing both anchored on the less distinctive word. Rarity matched a human read 3/3 where length managed 0/3. If no query term appears in the document at all, the window falls back to offset 0 and reports no anchoring term; that is a deliberate, honest head window rather than a fabricated match.
 
 ⚠️ **`offset` is in the RECONSTRUCTED text space, not the raw file.** The passage is rebuilt by joining the document's chunks, so chunk *p* begins at `(p−1)×1800`. `offset` and `content_length` address that reconstruction. **Each passage carries `offset_space`** — `"normalized"` on this path, `"document"` when it fell back to the API's own content — so a caller can tell which space it is in without assuming. Do not feed these offsets to a raw-file byte reader.
 

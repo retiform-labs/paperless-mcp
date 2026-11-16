@@ -44,8 +44,18 @@ const ALLOWED_UPLOAD_PATHS = process.env.PAPERLESS_MCP_UPLOAD_PATHS
 /** Default number of characters returned by a bounded content read. */
 export const DEFAULT_CONTENT_MAX_CHARS = 8000;
 
-/** Hard cap on characters a single tool response may inline. */
-export const DEFAULT_MAX_INLINE_CHARS = 50000;
+/**
+ * Hard cap on characters a single tool response may inline.
+ *
+ * 20,000 matches the client-side truncation ceiling our primary consumer
+ * applies (`DEFAULT_MAX_TOOL_RESULT_LENGTH`), and it matches the search path's
+ * own `MAX_RESULT_CHARS`. It was 50,000, which is 2.5x the consumer's limit —
+ * a budget above the one your reader enforces is not a budget: the response
+ * was built whole and then mangled downstream, silently, with the caller
+ * unable to detect it. Bounding at the source is the only honest option for a
+ * published server, since we cannot fix the client.
+ */
+export const DEFAULT_MAX_INLINE_CHARS = 20000;
 
 /** Default passage size for search_passages. */
 export const DEFAULT_PASSAGE_WINDOW = 800;

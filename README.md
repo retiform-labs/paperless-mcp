@@ -274,7 +274,7 @@ get_document_content({ id: 123, offset: 8000, max_chars: 8000 })
 Requests above the inline budget (`PAPERLESS_MCP_MAX_INLINE_CHARS`, default 50000) fail with the document size and a hint toward offset reads or the `download_document` resource — never a silent slice, never an unbounded return. The response always carries `content_length`, `truncated`, and `has_more` so callers can page deterministically.
 
 #### search_passages
-Search documents full-text and return **bounded text passages around each hit** instead of whole documents. Each window is anchored on the server's own highlighted phrase (falling back to the first verbatim term occurrence, then the document head), so the returned passage contains the actual hit even when the search index stemmed a word variant that does not appear verbatim in the stored text. Returns the document id, title, score, offset, `content_length`, and the highlighted snippet.
+Search documents full-text and return **bounded text passages around each hit** instead of whole documents. Each window is anchored on the server's own highlighted phrase (falling back to the **longest matching query term**, then the document head), so the returned passage contains the actual hit even when the search index stemmed a word variant that does not appear verbatim in the stored text. Returns the document id, title, score, offset, `content_length`, and the highlighted snippet.
 
 Queries that the server rejects with an opaque HTTP 400 (django-watson rejects some syntactically valid queries, notably those containing apostrophes) are retried once with a defensively rewritten query — apostrophes and stray quotes removed; structured filter values are never rewritten. Responses from a rewritten retry carry `query_sanitized: true`. Persistent failures throw a structured error naming every attempted query.
 
@@ -828,8 +828,8 @@ Parameters:
 ```typescript
 semantic_search({ query: "what did the inspector say about the roof" })
 // → {
-//     query, semantic: "ok", strong_match: true, total_hits: 4,
-//     passages: [{ id, title, score, matched, passage, offset, content_length }, ...]
+//     query, semantic: "ok", strong_match: true, total_hits: 4, offset_space,
+//     passages: [{ id, title, score, matched, highlights, passage, offset, content_length }, ...]
 //   }
 ```
 
@@ -846,6 +846,19 @@ arguments were applied, so it can exceed `passages.length`. The difference is no
 
 - **`filtered_out`** — how many candidates your filter arguments dropped. When non-zero, `filtered_out_reasons` says which filter did it: `metadata_filter` (a filter you passed) or `document_unavailable` (the document existed in the ranking but could no longer be fetched).
 - **`retrievers`** — which halves of the search actually ran, as `"vector"` and/or `"lexical"`. An empty `passages` with both names present is a real result: both engines ran and neither found anything. An empty `passages` with only one name is a partial answer, and `semantic` plus `degraded_reason` say why.
+
+**`trimmed`** is present **only when the response was too large to return whole**, and it says exactly what was cut rather than leaving the caller to guess:
+
+```typescript
+trimmed?: {
+  reason: "result_size";      // the only reason today
+  dropped: number;            // how many passages were removed
+  limit_chars: 20000;         // the ceiling that forced it
+  query_truncated?: boolean;  // true only when the ECHOED query was cut too
+}
+```
+
+⚠️ **The bound covers the whole serialised result, not just the passages.** A pathologically long `query` is echoed back, so it is also truncated when necessary — that is what `query_truncated` announces. **A trimmed response is a real answer, not a failure**: the passages you got are the highest-ranked ones, and `dropped` tells you how many you did not.
 
 ⚠️ **Note the gap this leaves.** Filtering happens after ranking, so a filtered query can return fewer
 passages than `limit` even when more documents matched the filter. `filtered_out` is how you see that

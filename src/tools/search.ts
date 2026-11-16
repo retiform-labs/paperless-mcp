@@ -347,12 +347,18 @@ export interface SemanticSearchResult {
 }
 
 /**
- * Cut a bounded passage around the first place the query terms appear.
+ * Cut a bounded passage around the most DISTINCTIVE place the query terms appear.
  *
  * Mirrors buildSearchPassage's anchoring priority minus the server highlight,
  * which does not exist on this path: the vector side has no highlighted span,
  * and the lexical side's BM25 match gives a chunk rather than an offset. So the
- * anchor is (1) the first verbatim query term, (2) the head of the document.
+ * anchor is (1) the LONGEST matching query term, (2) the head of the document.
+ *
+ * Length rather than query order, deliberately: English queries open with
+ * articles, so first-match anchored "the practice of a wrathful deity with a
+ * lion head" on "the" at character 3 and put eleven of eighteen windows at the
+ * document head. Containment still passed -- "the" really was in the window --
+ * which is why the defect survived a green suite and a code review.
  *
  * A window that does not contain the hit is worse than no window, which is why
  * the term search runs against the whole document rather than the chunk.

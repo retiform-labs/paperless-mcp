@@ -8,6 +8,7 @@ import { join } from "node:path";
 const root = join(__dirname, "..", "..");
 const searchSrc = readFileSync(join(root, "src/tools/search.ts"), "utf8");
 const readme = readFileSync(join(root, "README.md"), "utf8");
+const docsSrc = readFileSync(join(root, "src/tools/documents.ts"), "utf8");
 
 // The tool description IS the contract a client receives -- it ships in
 // tools/list and an agent writes control flow against it. The defect this
@@ -56,10 +57,39 @@ test("the README does not claim highlights is always absent", () => {
 // And the anchor: documented as "the first verbatim query term" both before
 // and after the fix that changed it, which is how a stale doc survives a
 // behaviour change.
-test("the README describes the length-based anchor, not query order", () => {
-  assert.ok(
-    !/anchored on the first verbatim query term/i.test(readme),
-    "the anchor is chosen by term LENGTH since ef12937; 'first' was the defect"
-  );
+//
+// ⚠️ THIS TEST WAS ITSELF THE FAILURE, ONCE. The first version checked the
+// README only, and the re-gate found `search.ts`'s OWN JSDoc still saying
+// "first verbatim query term" -- a doc correct in the copy a CLIENT reads and
+// wrong in the copy a MAINTAINER reads. A pin test that checks one surface is
+// a pin test that confirms the surface you happened to open.
+test("every surface describes the length-based anchor, not query order", () => {
+  for (const [name, text] of [["search.ts", searchSrc], ["documents.ts", docsSrc], ["README.md", readme]] as const) {
+    assert.ok(
+      !/first verbatim (query )?term/i.test(text),
+      `${name} still describes the retired query-order anchor`
+    );
+  }
   assert.match(readme, /longest matching query term/i);
+});
+
+
+// N1 from the re-gate: `trimmed` was emitted but documented NOWHERE, so a
+// caller could receive a shortened query with no way to know the contract.
+// F11's class exactly, one field over -- a field the code returns and the docs
+// do not describe.
+test("the README documents the trimmed contract it can receive", () => {
+  assert.match(readme, /\*\*`trimmed`\*\* is present/, "trimmed must be documented");
+  for (const key of ["reason", "dropped", "limit_chars", "query_truncated"]) {
+    assert.match(readme, new RegExp(key), `README must name trimmed.${key}`);
+  }
+});
+
+// N4: the example return shape omitted `highlights` (emitted when anchored)
+// and `offset_space` (emitted unconditionally).
+test("the semantic_search example shows the fields the code actually returns", () => {
+  const example = readme.slice(readme.indexOf("semantic_search({ query"), readme.indexOf("**Return shape.**"));
+  for (const field of ["highlights", "offset_space"]) {
+    assert.match(example, new RegExp(field), `the example shape must show ${field}`);
+  }
 });

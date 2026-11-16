@@ -828,8 +828,8 @@ Parameters:
 ```typescript
 semantic_search({ query: "what did the inspector say about the roof" })
 // → {
-//     query, semantic: "ok", strong_match: true, total_hits: 4, offset_space,
-//     passages: [{ id, title, score, matched, highlights, passage, offset, content_length }, ...]
+//     query, semantic: "ok", strong_match: true, total_hits: 4,
+//     passages: [{ id, title, score, matched, highlights, passage, offset, content_length, offset_space }, ...]
 //   }
 ```
 
@@ -837,7 +837,7 @@ semantic_search({ query: "what did the inspector say about the roof" })
 
 **Where the window anchors.** On the **longest matching query term**, which is the cheap correct proxy for the most *distinctive* one. It used to anchor on the first term in query order, and English queries open with articles — so `"the practice of a wrathful deity with a lion head"` anchored on `"the"` at character 3 and the window landed at the document head. Longest-match fixes that. If no query term appears in the document at all, the window falls back to offset 0 and reports no anchoring term; that is a deliberate, honest head window rather than a fabricated match.
 
-⚠️ **`offset` is in the RECONSTRUCTED text space, not the raw file.** The passage is rebuilt by joining the document's chunks, so chunk *p* begins at `(p−1)×1800`. `offset` and `content_length` address that reconstruction. The response carries `offset_space` saying so — do not feed these offsets to a raw-file byte reader.
+⚠️ **`offset` is in the RECONSTRUCTED text space, not the raw file.** The passage is rebuilt by joining the document's chunks, so chunk *p* begins at `(p−1)×1800`. `offset` and `content_length` address that reconstruction. **Each passage carries `offset_space`** — `"normalized"` on this path, `"document"` when it fell back to the API's own content — so a caller can tell which space it is in without assuming. Do not feed these offsets to a raw-file byte reader.
 
 **`matched`** is `"meaning"`, `"words"`, or `"both"`. It tells you whether to trust the hit or re-query lexically: `"words"` means the hit came from the lexical side and the vector side did not find it, so **do not read a words-only result as absence of a paraphrase** that is worded differently.
 

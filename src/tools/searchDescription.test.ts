@@ -93,3 +93,27 @@ test("the semantic_search example shows the fields the code actually returns", (
     assert.match(example, new RegExp(field), `the example shape must show ${field}`);
   }
 });
+
+// The live corpus caught THIS, and no unit test could have: I wrote the example
+// shape with `offset_space` at the TOP level, while the code puts it on every
+// PASSAGE. A doc-vs-code drift I introduced myself while fixing another one --
+// which is the whole argument for testing the docs rather than rereading them.
+test("the example puts offset_space on the passage, not on the result", () => {
+  const example = readme.slice(readme.indexOf("semantic_search({ query"), readme.indexOf("**Return shape.**"));
+  const passagesLine = example.slice(example.indexOf("passages: ["));
+  assert.match(passagesLine, /offset_space/, "offset_space belongs inside passages[]");
+  assert.ok(
+    !/total_hits: \d+,\s*offset_space/.test(example),
+    "offset_space is per-passage; the top-level result does not carry it"
+  );
+});
+
+// And it must survive as a real per-passage field in the type, not merely in
+// prose -- the README example is derived from the interface, so if the field
+// ever moves the example is wrong again.
+test("SemanticPassage declares offset_space and the result type does not", () => {
+  const passageIface = searchSrc.slice(searchSrc.indexOf("export interface SemanticPassage"), searchSrc.indexOf("export interface SemanticSearchResult"));
+  assert.match(passageIface, /offset_space/, "SemanticPassage must declare it");
+  const resultIface = searchSrc.slice(searchSrc.indexOf("export interface SemanticSearchResult"), searchSrc.indexOf("export interface SemanticSearchResult") + 3000);
+  assert.ok(!/^\s*offset_space/m.test(resultIface), "SemanticSearchResult must not declare it");
+});

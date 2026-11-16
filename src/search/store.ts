@@ -837,6 +837,38 @@ export class SearchIndex {
   }
 
   /**
+   * How many indexed chunks contain each term.
+   *
+   * Exists so the passage anchor can pick the MOST DISTINCTIVE query term
+   * instead of merely the longest. Measured on the live corpus, length is a bad
+   * proxy: for "what did the doctor say about the ankle" it chose `doctor`
+   * (1,903 chunks) over `ankle` (808) purely because it is one character
+   * longer, and for "the practice of a wrathful deity with a lion head" it
+   * chose `practice` (36,459 chunks) over `wrathful` (4,657). Rarity agreed
+   * with a human read in 3 of 3 cases; length in 0 of 3.
+   *
+   * One indexed lookup per term, and `toFtsMatch` already caps a query at 32
+   * terms, so this cannot become an unbounded scan. A term absent from the
+   * index reports 0 rather than throwing -- "not in the corpus" is a legitimate
+   * and very informative answer here.
+   */
+  termChunkCounts(terms: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    const db = this.handle();
+    if (!this.hasFts5) return out;
+    const stmt = db.prepare("SELECT count(*) AS c FROM fts WHERE fts MATCH ?");
+    for (const term of new Set(terms)) {
+      try {
+        out.set(term, (stmt.get(`"${term.replace(/"/g, '""')}"`) as { c: number }).c);
+      } catch {
+        // A term FTS5 cannot parse is simply unscored; the anchor falls back
+        // to length for it rather than failing the whole search.
+      }
+    }
+    return out;
+  }
+
+  /**
    * How many indexed documents were cut off at the chunk cap.
    *
    * Exposed because truncation is the one index fact that changes what a caller

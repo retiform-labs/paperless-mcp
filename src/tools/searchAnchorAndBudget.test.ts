@@ -26,12 +26,64 @@ test("anchor skips a leading stopword and centres on the distinctive term", () =
     800
   );
 
-  assert.equal(term, "sinhamukha", "must anchor on the longest matching term");
+  assert.equal(term, "sinhamukha", "must anchor on the rarest/longest matching term");
   assert.ok(
     offset > 1000,
     `offset ${offset} is at the document head -- it anchored on a stopword`
   );
   assert.ok(passage.includes("Sinhamukha"), "the window must contain the match");
+});
+
+// ---------------------------------------------------------------------------
+// RARITY BEATS LENGTH, AND THIS IS THE CASE THAT PROVED IT ON THE LIVE CORPUS.
+//
+// My first correction to the stopword defect ranked terms by LENGTH. Measured
+// against the real index, it chose `doctor` (1,903 chunks) over `ankle` (808)
+// because "doctor" is one character longer -- so the window landed on a
+// discussion of doctors instead of the ankle the user asked about. Rarity
+// agreed with a human read in 3 of 3 live probes; length in 0 of 3.
+//
+// The test below is the same shape in miniature: a LONGER but COMMON term and a
+// shorter but RARE one, both present.
+// ---------------------------------------------------------------------------
+test("a rare term beats a longer common one when counts are supplied", () => {
+  const content = GARBAGE + "the ankle" + GARBAGE + "doctor" + GARBAGE;
+  const rarity = new Map([
+    ["doctor", 1903],   // longer, but common
+    ["ankle", 808],     // shorter, but rare -> must win
+    ["the", 296835],
+    ["about", 63960],
+  ]);
+  const { term } = buildPassage(
+    { id: 9, title: "t", content },
+    ["the", "about", "doctor", "ankle"],
+    400,
+    rarity
+  );
+  assert.equal(term, "ankle", "rarity must outrank length");
+});
+
+test("without counts it still improves on query order via length", () => {
+  const content = GARBAGE + "naropa" + GARBAGE;
+  const { term } = buildPassage(
+    { id: 10, title: "t", content },
+    ["the", "six", "yogas", "naropa"],
+    400
+  );
+  assert.equal(term, "naropa", "the degraded path must still skip stopwords");
+});
+
+test("an unscored term does not outrank a scored one", () => {
+  // A term the caller could not score sorts last, not first.
+  const content = "zzzqqq" + GARBAGE + "wombat" + GARBAGE;
+  const rarity = new Map([["wombat", 412]]);
+  const { term } = buildPassage(
+    { id: 11, title: "t", content },
+    ["zzzqqq", "wombat"],
+    400,
+    rarity
+  );
+  assert.equal(term, "wombat");
 });
 
 test("a word that is absent never wins the anchor", () => {

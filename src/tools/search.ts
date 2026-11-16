@@ -352,13 +352,15 @@ export interface SemanticSearchResult {
  * Mirrors buildSearchPassage's anchoring priority minus the server highlight,
  * which does not exist on this path: the vector side has no highlighted span,
  * and the lexical side's BM25 match gives a chunk rather than an offset. So the
- * anchor is (1) the LONGEST matching query term, (2) the head of the document.
+ * anchor is (1) the RAREST matching query term, (2) the head of the document.
  *
- * Length rather than query order, deliberately: English queries open with
- * articles, so first-match anchored "the practice of a wrathful deity with a
- * lion head" on "the" at character 3 and put eleven of eighteen windows at the
- * document head. Containment still passed -- "the" really was in the window --
- * which is why the defect survived a green suite and a code review.
+ * Rarity, not query order and not length. Query order was the original defect:
+ * English queries open with articles, so first-match anchored "the practice of
+ * a wrathful deity with a lion head" on "the" at character 3, and containment
+ * still passed because "the" really was in the window. Length was my first
+ * correction and it is also wrong -- measured live, it picks `doctor` over
+ * `ankle` by one character. Rarity picks the term the query is ABOUT.
+ * When the caller cannot supply counts, length is the fallback.
  *
  * A window that does not contain the hit is worse than no window, which is why
  * the term search runs against the whole document rather than the chunk.
@@ -366,7 +368,23 @@ export interface SemanticSearchResult {
 export function buildPassage(
   doc: { id: number; title: string; content: string | null },
   terms: string[],
-  window: number
+  window: number,
+  /**
+   * How many indexed chunks contain each term, when the caller can supply it.
+   *
+   * ⚠️ THIS IS THE CORRECT DISCRIMINATOR AND LENGTH IS NOT. Measured on the
+   * live corpus: "what did the doctor say about the ankle" picked `doctor`
+   * (1,903 chunks) over `ankle` (808) on length alone -- wrong, and wrong in
+   * the way that matters, because the window then lands on a discussion of
+   * doctors rather than of the ankle. "the practice of a wrathful deity with a
+   * lion head" picked `practice` (36,459) over `wrathful` (4,657). Rarity
+   * matched a human read in 3 of 3 probes; length in 0 of 3.
+   *
+   * Optional so a caller with no index (the search_passages path, whose terms
+   * come from the server's own query) still works -- it then falls back to
+   * length, which is worse but still better than query order.
+   */
+  termRarity?: Map<string, number>
 ): { passage: string; offset: number; content_length: number; term?: string } {
   const full = doc.content ?? "";
   const lower = full.toLowerCase();
@@ -386,7 +404,16 @@ export function buildPassage(
   // a longer term is what distinguishes this query from most others. Ties keep
   // query order via the stable sort. If nothing matches, offset 0 and say so --
   // a head window is honest when the query genuinely appears nowhere.
-  const candidates = [...terms].sort((a, b) => b.length - a.length);
+  // Rarity first (rarest in the corpus = most specific to this query), then
+  // length as a tie-break, then query order via the stable sort. A term the
+  // caller could not score sorts on length alone.
+  const rarityOf = (t: string): number => termRarity?.get(t.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+  const candidates = [...terms].sort((a, b) => {
+    const ra = rarityOf(a);
+    const rb = rarityOf(b);
+    if (ra !== rb) return ra - rb;
+    return b.length - a.length;
+  });
   for (const term of candidates) {
     const at = lower.indexOf(term.toLowerCase());
     if (at >= 0) {
@@ -866,6 +893,11 @@ export async function runSemanticSearch(
   const indexText = opts.loadText ? opts.loadText(fused) : undefined;
 
   const passages: SemanticPassage[] = [];
+
+  // ONE rarity lookup for the whole request, not one per document. The anchor
+  // needs it per document, but the counts are a property of the corpus and the
+  // query, not of the document being windowed.
+  const rarity = store.termChunkCounts(terms);
   // Post-fetch accounting. Without it `total_hits: 12, passages: []` was a
   // legal, unexplained response: the caller could not tell that its own filter
   // arguments had removed everything.
@@ -886,7 +918,8 @@ export async function runSemanticSearch(
     const anchored = buildPassage(
       { id: doc.id, title: doc.title, content: fromIndex ? indexed : doc.content },
       terms,
-      opts.window
+      opts.window,
+      rarity
     );
     passages.push({
       id: doc.id,

@@ -1,0 +1,41 @@
+# .dxtignore — what the DXT bundle must NOT carry.
+#
+# `dxt pack` bundles from the FILESYSTEM, git-agnostically: it does not read
+# .gitignore at all. So everything .gitignore excludes still went into the
+# bundle, and 2.4.0's `.dxt` was 27.4 MB of the 28.5 MB tarball — 100 MB of
+# node_modules unpacked, including the TypeScript compiler and Prettier.
+#
+# Runtime dependencies MUST stay: a DXT bundle has no install step, so
+# `node_modules` is how the server gets `better-sqlite3`, `sqlite-vec`, the MCP
+# SDK and the rest at runtime. Only the things that exist to BUILD the package
+# are excluded here.
+
+# ---- devDependencies: present to build, never to run ----
+node_modules/typescript
+node_modules/ts-node
+node_modules/@types
+node_modules/@anthropic-ai/dxt
+node_modules/@changesets
+node_modules/prettier
+
+# ---- sources: the bundle runs `build/`, it never compiles ----
+src
+e2e
+eval
+scripts
+tsconfig*.json
+*.tsbuildinfo
+
+# ---- repository furniture ----
+.changeset
+.github
+.serena
+.vscode
+test
+docs
+
+# ---- tests and their compiled output (npm tarball excludes these separately;
+#      the bundle inherited 58 of them into the .dxt as well) ----
+*.test.js
+*.test.d.ts
+__mocks__

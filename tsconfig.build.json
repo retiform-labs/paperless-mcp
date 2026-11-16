@@ -1,0 +1,20 @@
+{
+  // The published artifact carried 58 test files (29 `.test.js` + 29
+  // `.test.d.ts`): `tsconfig.json` includes all of `src`, tests live in `src`,
+  // so `tsc` emitted them into `build/` and `files: ["build"]` shipped them.
+  //
+  // A consumer installing a server should not receive its test suite. This is
+  // the build-only view: same compiler options, minus the tests. `npm test`
+  // still runs against `src/**/*.test.ts` via ts-node and `tsconfig.json`, so
+  // nothing about testing changes by excluding them HERE.
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    "e2e",
+    "build",
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts",
+    "src/**/__mocks__/**",
+    "src/**/testUtils.ts"
+  ]
+}

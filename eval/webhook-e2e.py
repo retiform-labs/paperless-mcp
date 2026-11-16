@@ -31,8 +31,12 @@ TOKEN = os.environ.get("PAPERLESS_API_KEY", "")
 WEBHOOK_PORT = int(os.environ.get("HOOK_PORT", "8891"))
 HOOK = f"http://127.0.0.1:{WEBHOOK_PORT}/webhook/paperless"
 SECRET = os.environ.get("HOOK_SECRET", "")
-INDEX_DB = os.environ.get(
-    "PAPERLESS_MCP_INDEX_DIR", "/REDACTED/.local/share/paperless-mcp/index"
+def _expand(p):
+    return os.path.expanduser(p)
+
+
+INDEX_DB = os.path.expanduser(
+    os.environ.get("PAPERLESS_MCP_INDEX_DIR", "~/.local/share/paperless-mcp/index")
 ) + "/index.db"
 
 

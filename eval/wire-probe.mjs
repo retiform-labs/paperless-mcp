@@ -1,6 +1,6 @@
 // Stage-7 wire probe: spawn the INSTALLED package and exercise it.
 // Run from a clean-room install so the bytes are the ones a stranger receives.
-//   node /REDACTED/src/paperless-mcp/eval/wire-probe.mjs
+//   node path/to/paperless-mcp/eval/wire-probe.mjs
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";

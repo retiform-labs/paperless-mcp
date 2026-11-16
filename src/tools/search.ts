@@ -199,8 +199,10 @@ export interface SemanticPassage {
   title: string;
   /**
    * The fusion score, NOT a similarity. See the `score` note on
-   * `SemanticSearchResult` — the range is (0, 2/61] and 0.033 is the ceiling,
-   * not a weak match. Read `matched` and `highlights` for quality, not this.
+   * `SemanticSearchResult` — the range is (0, 2/(k+1)] where `k` is
+   * `DEFAULT_FUSE_K`, and a value at the top of that range is a perfect fusion
+   * on this scale, not a strong similarity. Read `matched` and `highlights`
+   * for quality, not this.
    */
   score?: number;
   /** The query term the passage was anchored on, when one was found. */
@@ -332,10 +334,12 @@ export interface SemanticSearchResult {
   /**
    * Ranked passages, bounded.
    *
-   * ⚠️ ABOUT `score`: it is the reciprocal-rank-fusion SUM, `Σ 1/(60 + rank)`,
-   * not a similarity. With two retrievers the maximum reachable value is
-   * `2 / 61 = 0.0328`, so a well-matched passage reports about 0.033 and reads
-   * as terrible if you assume a 0..1 similarity scale.
+   * ⚠️ ABOUT `score`: it is the reciprocal-rank-fusion SUM, `Σ 1/(k + rank)`,
+   * not a similarity, where `k` is `DEFAULT_FUSE_K`. With two retrievers the
+   * maximum reachable value is `2 / (k + 1)`. Do NOT hard-code that ceiling:
+   * it moves whenever `k` moves (it was 0.033 at the old k=60 and is 0.182 at
+   * the shipped k=10), and a caller who assumes a 0..1 similarity scale will
+   * read a well-matched passage as terrible either way.
    *
    * It is left un-normalised ON PURPOSE. Normalising against the best score in
    * the same result set would report 1.0 for the head of a set where every hit

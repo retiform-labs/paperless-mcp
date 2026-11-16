@@ -77,33 +77,35 @@ built from arms fetched at `k*4` returns up to `4k` entries, so counting
 "appeared anywhere in the list" scored "anywhere in 80" as a hit@10 — measured,
 that inflated fused hit@10 from 15 to 19 before it was fixed.
 
-## What a `score` is NOT (the trap that makes 0.033 look broken)
+## What a `score` is NOT (the trap that makes a perfect result look broken)
 
 **The fused `score` is an unnormalised reciprocal-rank-fusion sum, not a
 similarity.** For each list a document appears in, it contributes
-`1 / (k + rank)` with `k = 60`, using its best rank in that list:
+`1 / (k + bestRank)` — using its best rank in that list — where `k` is the
+dampening constant exported as `DEFAULT_FUSE_K` from `src/search/rank.ts`:
 
 ```
-score = Σ_arms  1 / (60 + bestRank_in_that_arm)
+score = Σ_arms  1 / (k + bestRank_in_that_arm)
 ```
 
-The ceiling is therefore `1/61 + 1/61 = 2/61 ≈ 0.0328`, reached only by a
-document ranked **first by both arms**. So:
+**Do not hard-code the ceiling: it is a function of `k`, not a property of the
+engine.** The maximum is `2/(k+1)`, reached only by a document ranked **first by
+both arms**. Changing `k` rescales every score in the response, which is why no
+constant appears here and why nothing in the tool interprets a score against a
+fixed number.
 
-| value | means |
-|---|---|
-| `0.0328` | ranked **first by both arms** (`2/61`) — the ceiling |
-| `0.0164` | ranked first by exactly one arm (`1/61`) |
-| `0.0161` | ranked second by one arm, absent from the other (`1/62`) |
-| `0.0091` | ranked 50th by one arm, absent from the other (`1/110`) |
-| `0.0080` | ranked 65th by one arm, absent from the other (`1/125`) |
+> **Dated illustration only — re-derive, do not transplant.** At `k = 60` the
+> ceiling is `2/61 ≈ 0.033`; at the shipped `k = 10` it is `2/11 ≈ 0.182`. Same
+> ranking, same relative order, different scale. (For the record: `k` was 60
+> until 2026-11-16, inherited from the upstream fork without ever being tuned
+> against this corpus — see the `fix(search): fuse at k=10` commit for the
+> measurement.)
 
-*(Computed, not eyeballed: `1/(60+r)` for r = 1, 2, 50, 65.)*
-
-**`0.033` is not "3% relevant". It is a perfect score on this scale.** Any
-threshold a caller invents against this number will be wrong unless it is
-expressed in RRF units, which is why the tool no longer presents it as a
-relevance percentage.
+**A score near the ceiling is not "the relevant fraction", and a score near zero
+is not "barely relevant".** Both are positions in an RRF sum. Any threshold a
+caller invents will be wrong unless it is expressed in RRF units for the `k` in
+force, which is why the tool no longer presents a score as a relevance
+percentage.
 
 **`strong_match` is not a quality signal either.** The 0.45 similarity floor it
 used to consult sits *below* the worst irrelevant query on this corpus (measured
@@ -121,8 +123,8 @@ arm before fusion, but it is not what a fused result's `score` carries.
 |---|---|
 | `vector-only` | `POST :11434/api/embeddings` with the mandatory `search_query: ` prefix → `vec_chunks` kNN via `store.vectorHits` |
 | `lexical-only` | FTS5 BM25 via `store.textHits` |
-| `fused (shipped)` | RRF k=60 over arms fetched at `limit*4` — the shape `runSemanticSearch` actually uses |
-| `fused (deep)` | RRF k=60 over both arms at 200 documents, to separate "fusion is weak" from "the pool was shallow" |
+| `fused (shipped)` | RRF at `DEFAULT_FUSE_K` over arms fetched at `limit*4` — the shape `runSemanticSearch` actually uses |
+| `fused (deep)` | RRF at `DEFAULT_FUSE_K` over both arms at 200 documents, to separate "fusion is weak" from "the pool was shallow" |
 
 Measurement is against the **store**, not the tool, so HTTP and passage-assembly
 overhead cannot contaminate the retrieval number. The full tool path is a
@@ -207,21 +209,31 @@ arm depth of 200. Measured @10 distribution, counted from the log:
                         rrf k=60 head=10 only
 16/20    5 strategies   lexical-only, wrrf wL=0.5, wrrf wV=2,
                         minmax sum wL=2, zscore miss=min wL=2
-15/20    1 strategy     rrf k=60 (THE SHIPPED FORM)
+15/20    1 strategy     rrf k=60 (WAS shipped; replaced by k=10 on 2026-11-16)
 14/20    3 strategies   vector-only, wrrf wV=0.5, wrrf wL=2
 ```
 
-**The shipped `rrf k=60` is the WORST fusion strategy in the field at @10.** The
-mechanism is arithmetic: with `k=60`, `2/(60+D) > 1/61` for every `D < 62`, so any
-document found by *both* arms anywhere in the top 62 outranks *any* perfect
-single-arm hit. RRF optimises for consensus, and consensus is the wrong prior
-when the arms are materially unequal on a query class — ours are (Tibetan-heavy
-dharma against mostly-English prose).
+**`rrf k=60` was the WORST fusion strategy in the field at @10 — and it was what
+shipped until 2026-11-16.** The mechanism is arithmetic: with `k`, a document
+both arms hold at rank `D` scores `2/(k+D)` while a document one arm ranked
+first scores `1/(k+1)`, so a dual-arm document outranks a perfect single-arm hit
+for every `D < k+2`. At `k=60` that crossover sits at `D=62` — any document found
+by *both* arms anywhere in the top 62 beat *any* perfect single-arm hit. RRF
+optimises for consensus, and consensus is the wrong prior when the arms are
+materially unequal on a query class — ours are (Tibetan-heavy dharma against
+mostly-English prose).
 
-⚠️ **The strategy is deliberately still unchosen.** `max-of-two` ties the best
-score with *no fusion at all*, which is a real argument for deleting the ranker
-rather than tuning it — but at @50 and @200 several strategies tie, so the
-fixture is not yet sharp enough to separate them. Sharpen the fixture, then choose.
+**RESOLVED 2026-11-16: `k` is now `10`** (`DEFAULT_FUSE_K`). The table above is
+the evidence for that change, not a live finding — `k=10`, `5`, `2`, `1` and `0`
+all tie at 18/20 @10, so `10` was taken as the smallest change that removes the
+crossover pathology while keeping rank order meaningful across the pool. **Which
+value below 60 is genuinely best is still inside this fixture's noise; that is
+not settled and is not claimed.**
+
+⚠️ **`max-of-two` still ties the best score with *no fusion at all***, which
+remains a real argument for deleting the ranker rather than tuning it. At @50
+and @200 several strategies tie, so the fixture is not yet sharp enough to
+separate them. **Sharpen the fixture before making a further change.**
 
 ⚠️ **Only the 22:39 run is admissible — and the criterion is a validation count,
 not a timestamp.** That run reported `membershipChecks: 120, membershipMismatch: 0`

@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 // FUSION BAKE-OFF -- measurement only. Touches nothing under src/.
 //
-// WHY: production fusion is RRF with k=60. At @10 on the 20-case fixture it
-// scores 15/20 while the best single arm scores 16/20, and every worst
-// regression is a document only ONE arm retrieves. The arithmetic explains why:
-// with k=60 a doc both arms find at rank 40 scores 2/100=0.0200 while a doc one
-// arm finds at rank 1 scores 1/61=0.0164 -- so any dual-arm doc inside the top
-// 62 outranks any perfect single-arm hit. That is a property of RRF, not a bug.
+// WHY: production fusion is RRF, and the value of k is a real lever.
+// (History: production ran k=60 until 2026-11-16, inherited from the upstream
+// fork. This harness is what showed it was the weakest arm in the field.)
+// At @10 on the 20-case fixture k=60 scores 15/20 while the best single arm
+// scores 16/20, and every worst regression is a document only ONE arm
+// retrieves. The arithmetic explains why: with k a doc both arms find at rank D
+// scores 2/(k+D) while a doc one arm finds at rank 1 scores 1/(k+1) -- so any
+// dual-arm doc with D < k+2 outranks any perfect single-arm hit, and at k=60
+// that means the entire top 62. That is a property of RRF, not a bug.
 //
 // WHAT THIS DOES: holds the retrievers FIXED (the shipped store methods) and
 // varies ONLY the fusion. Every strategy consumes the same two deep lists per
@@ -16,8 +19,13 @@
 // decide. 20 cases is a small sample; where two strategies differ by one case
 // that is inside the fixture's noise and the report says so.
 //
-// VALIDATION BUILT IN: "RRF k=60 on arms pinned at 200" must reproduce the
-// previously measured 15/18/20 row. If it does not, the harness is wrong.
+// VALIDATION BUILT IN: the "rrf k=60 (upstream default)" and "rrf k=10 (SHIPPED
+// FORM)" rows must reproduce their previously measured values (15/@10 and 18/@10
+// at arms pinned at 200). If either does not, the harness is wrong.
+//
+// ⚠️ Strategy names are module CONSTANTS (MAX_OF_TWO / RRF_UPSTREAM /
+// RRF_SHIPPED) because the reporting section indexes this table BY NAME. Rename
+// a label without updating those and the run dies mid-table with a TypeError.
 
 import { readFileSync, statSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";

@@ -270,6 +270,57 @@ describe("runSemanticSearch — the index-text seam (loadText)", () => {
     }
   });
 
+  test("offset actually ADDRESSES the reconstructed text (the caller's contract)", async () => {
+    // The property a caller relies on: `text.slice(offset, offset + passage.length)`
+    // must equal `passage`. Without it the offset is decoration and every
+    // window-hop a caller performs lands on the wrong characters.
+    //
+    // This is checked against the RECONSTRUCTED text (metadata chunk dropped,
+    // nothing else) because that is what the loader hands to buildPassage. With
+    // a single content chunk the reconstructed text and the raw chunk agree --
+    // the multi-chunk case is where they diverge, and that is covered by
+    // reconstructDocumentText's own round-trip test in searchIndexText.test.ts.
+    const indexText = `${"a".repeat(600)} prana winds ${"b".repeat(600)}`;
+    const { context, index } = buildContext([{ id: 1, title: "Winds", indexText }]);
+    try {
+      const result = await runSemanticSearch(context, "prana", {
+        limit: 1,
+        window: 200,
+        loadDocuments: async () => new Map([[1, metadataOnly(1, "Winds")]]),
+        loadText: (hits) => {
+          const text = new Map<number, string>();
+          for (const id of new Set(hits.map((hit) => hit.documentId))) {
+            text.set(
+              id,
+              index
+                .chunksFor(id)
+                .filter((chunk) => chunk.kind === "content")
+                .map((chunk) => chunk.text)
+                .join("")
+            );
+          }
+          return text;
+        },
+      });
+
+      const passage = result.passages[0];
+      assert.equal(
+        indexText.slice(passage.offset, passage.offset + passage.passage.length),
+        passage.passage,
+        `offset ${passage.offset} does not address the text it claims to`
+      );
+      // And the offset must land ON the term, not merely somewhere valid: the
+      // window is centred on it, so the term sits inside [offset, offset+len).
+      assert.ok(
+        passage.offset <= indexText.indexOf("prana") &&
+          passage.offset + passage.passage.length > indexText.indexOf("prana"),
+        "the anchored term must fall inside the window"
+      );
+    } finally {
+      index.close();
+    }
+  });
+
   test("an id the loader omits falls back to doc.content rather than vanishing", async () => {
     // `indexText?.get(doc.id)` is undefined when the loader does not know the
     // id. The documented behaviour is a fallback to `doc.content`, NOT a drop:

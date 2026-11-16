@@ -847,7 +847,11 @@ arguments were applied, so it can exceed `passages.length`. The difference is no
 passages than `limit` even when more documents matched the filter. `filtered_out` is how you see that
 happened rather than assuming the corpus is thin.
 
-**`strong_match`** is `true` when any returned passage cleared the similarity floor (0.45) or matched lexically. It is a **similarity (1 − distance)**, not a distance — higher is closer. A `false` here means everything returned is weak, and a re-query with different wording is worth trying.
+**`strong_match`** is `true` exactly when at least one passage was returned. It is a **coarse "did anything come back" flag, not a quality judgement.**
+
+⚠️ **It used to consult a 0.45 similarity floor, and that floor could not fire on this corpus.** Measured: best raw similarities run **0.73–0.79**, so 0.45 sits *below the worst irrelevant query* — the old field reported `true` on every call that produced a hit, regardless of quality. Rather than keep a field that cannot be `false`, it now says what it actually means.
+
+Judge result quality from **`matched`** (meaning / words / both), **`retrievers`** (which halves ran), and the passages themselves. Do not write `if (!strong_match) requery()` — that branch is unreachable.
 
 **Degradation contract.** The embedding server being down is an expected condition, not an error, so `semantic_search` never fails because of it. It returns the lexical results it can still produce, with `semantic: "unavailable"` and a `degraded_reason` naming the cause:
 

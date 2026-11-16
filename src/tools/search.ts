@@ -326,6 +326,8 @@ export interface SemanticSearchResult {
     reason: "result_size";
     dropped: number;
     limit_chars: number;
+    /** True when the echoed `query` itself was cut to fit, not just passages. */
+    query_truncated?: boolean;
   };
   /**
    * Ranked passages, bounded.
@@ -364,7 +366,22 @@ export function buildPassage(
   const lower = full.toLowerCase();
   let center = -1;
   let found: string | undefined;
-  for (const term of terms) {
+  // ANCHOR ON THE MOST SPECIFIC TERM, not the first one in query order.
+  //
+  // Measured defect this fixes: the query "the practice of a wrathful deity with
+  // a lion head" anchored on "the" at character 3, because `indexOf` walks the
+  // query left-to-right and English queries open with articles. 11 of 18 windows
+  // landed at the document head. Containment still passed -- "the" really is in
+  // the window -- which is exactly why no test caught it: the property that
+  // holds is the weak one, and the one that matters (a window around the
+  // DISTINCTIVE term) was never asserted.
+  //
+  // Length is the cheap proxy for specificity here, and it is the right one:
+  // a longer term is what distinguishes this query from most others. Ties keep
+  // query order via the stable sort. If nothing matches, offset 0 and say so --
+  // a head window is honest when the query genuinely appears nowhere.
+  const candidates = [...terms].sort((a, b) => b.length - a.length);
+  for (const term of candidates) {
     const at = lower.indexOf(term.toLowerCase());
     if (at >= 0) {
       center = at;
@@ -1001,7 +1018,7 @@ export function registerSearchTools(
 
   server.tool(
     "semantic_search",
-    "Search the document corpus by MEANING as well as by words, using a local vector index fused with the corpus' own BM25 lexical search. Returns bounded passages in the same shape as search_passages (id, title, score, passage, offset, content_length) plus `matched`, which says whether the hit came from meaning, words, or both -- a 'words' hit is a lexical match the vector side did not find, so do not read it as absence of a paraphrase. HONEST DEGRADATION: `semantic` is 'unavailable' and lexical results are still returned when the local embedding server is down; a degraded call never returns a silent empty list. strong_match is false when nothing scored above the similarity floor. Requires the local index to have been built with sync_embeddings.",
+    "Search the document corpus by MEANING as well as by words, using a local vector index fused with the corpus' own BM25 lexical search. Returns bounded passages in the same shape as search_passages (id, title, score, passage, offset, content_length) plus `matched`, which says whether the hit came from meaning, words, or both -- a 'words' hit is a lexical match the vector side did not find, so do not read it as absence of a paraphrase. HONEST DEGRADATION: `semantic` is 'unavailable' and lexical results are still returned when the local embedding server is down; a degraded call never returns a silent empty list. strong_match is true exactly when at least one passage was returned; it is a COARSE 'did-anything-come-back' flag, NOT a quality judgement -- the 0.45 similarity floor it used to consult cannot fire on this corpus (best raw similarities run 0.73-0.79), so judge quality from `matched`, `retrievers` and the passages themselves. Requires the local index to have been built with sync_embeddings.",
     {
       query: z.string().min(1).describe("What to search for, in natural language."),
       limit: z
@@ -1339,6 +1356,12 @@ export function indexTextLoader(
  */
 export function fitResultToBudget(result: SemanticSearchResult): SemanticSearchResult {
   if (JSON.stringify(result).length <= MAX_RESULT_CHARS) return result;
+  // ⚠️ A PASSAGE-ONLY TRIM IS NOT A BOUND. Measured: `fitResultToBudget` dropped
+  // passages and never touched the ECHOED QUERY, which has no length limit -- a
+  // 30,000-char query returned 30,128 chars with zero passages, over the ceiling
+  // the function exists to enforce. Dropping every passage cannot fix an
+  // oversize field that is not a passage. Echo less.
+  const echo = typeof result.query === "string" ? result.query : "";
   const passages = [...result.passages];
   let dropped = 0;
   let candidate: SemanticSearchResult = result;
@@ -1352,7 +1375,33 @@ export function fitResultToBudget(result: SemanticSearchResult): SemanticSearchR
     };
     if (JSON.stringify(candidate).length <= MAX_RESULT_CHARS) return candidate;
   }
-  return candidate;
+  // Every passage is gone and it is STILL over budget: the query echo alone is
+  // too large. Truncate the echo rather than return an oversize result, and say
+  // so -- a silently truncated query is indistinguishable from a short one.
+  //
+  // ⚠️ MEASURE AFTER ADDING THE FLAG, NOT BEFORE. The first cut of this computed
+  // the overflow against the payload WITHOUT `query_truncated`, then added that
+  // field -- which is 24 chars -- and returned 20,074 against a 20,000 ceiling.
+  // A bound that its own error message breaks is not a bound, and the test
+  // caught it only because it asserted the serialised length rather than the
+  // passage count. Loop until it actually fits; the flag costs bytes, so assume
+  // it is present from the first attempt.
+  const declared = {
+    ...candidate,
+    trimmed: {
+      reason: "result_size" as const,
+      dropped,
+      limit_chars: MAX_RESULT_CHARS,
+      query_truncated: true,
+    },
+  };
+  let keep = echo.length;
+  for (;;) {
+    const over = JSON.stringify({ ...declared, query: echo.slice(0, keep) }).length - MAX_RESULT_CHARS;
+    if (over <= 0 || keep === 0) break;
+    keep = Math.max(0, keep - over - 1);
+  }
+  return { ...declared, query: echo.slice(0, keep) };
 }
 
 export interface EmbeddingStatus {

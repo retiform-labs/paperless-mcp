@@ -95,7 +95,7 @@ export const MAX_LIMIT = 50;
  * The largest JSON body a caller can be handed, in characters.
  *
  * This is not our budget to choose freely: it is the ceiling the CONSUMER
- * applies. Mneme truncates any non-memory tool result at 20,000 characters by
+ * applies. MCP clients commonly truncate a tool result at 20,000 characters by
  * taking head and tail, and the agent on the other side cannot detect that it
  * happened -- a passage that was silently cut reads exactly like a short one.
  *

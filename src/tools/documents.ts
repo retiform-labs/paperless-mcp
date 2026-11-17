@@ -205,7 +205,18 @@ export function buildSearchPassage(
   }
   const resolved = center < 0 ? 0 : center;
   const start = Math.max(0, resolved - Math.floor(window / 2));
-  const passage = full.slice(start, start + window);
+  // The end is widened only when doing so is required to CONTAIN the phrase it
+  // is anchoring on, exactly as buildPassage in search.ts does. A window that
+  // stops one character short of the match it was centred for is the containment
+  // defect this builder exists to avoid, and with an anchor longer than the
+  // requested window the plain start-plus-window slice produces precisely that,
+  // while the returned highlights field still quotes the full phrase. The two
+  // functions are documented as mirror images, so the widening has to exist in
+  // both or the mirror lies.
+  const anchors = [...terms].sort((a, b) => b.length - a.length);
+  const anchor = anchors.find((term) => lowerFull.indexOf(term.toLowerCase()) >= 0);
+  const anchorEnd = anchor ? resolved + anchor.length : start + window;
+  const passage = full.slice(start, Math.max(start + window, anchorEnd));
   return {
     id: doc.id,
     title: doc.title,

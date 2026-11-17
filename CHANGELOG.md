@@ -135,6 +135,7 @@
 
   Both dependencies are new: `better-sqlite3` and `sqlite-vec`.
 
+- **The opsec gate is a local gate, not a publish hook.** Wiring it into `prepublishOnly` made publishing impossible in CI: the pattern file holds vocabulary that must never be published, so it cannot be committed and a runner has no copy, and the gate correctly refuses to report clean without its rules. `prepublishOnly` now runs the build; the pre-push hook -- which sees the commits, and a leak in a commit is the leak that reaches the registry -- remains the enforcement point. `npm run release:gate` is the explicit local pre-publish check.
 ## 2.3.6
 
 ### Patch Changes

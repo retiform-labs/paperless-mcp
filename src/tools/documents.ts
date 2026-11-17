@@ -13,6 +13,7 @@ import {
   LIST_DOCUMENTS_ARGS_SHAPE,
   QUERY_DOCUMENTS_ARGS_SHAPE,
   SEARCH_DOCUMENTS_ARGS_SHAPE,
+  paperlessFiltersSchema,
 } from "./utils/documentQuery";
 import { withErrorHandling } from "./utils/middlewares";
 import { validateCustomFields } from "./utils/monetary";
@@ -758,17 +759,12 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
       created__date__lte: z.string().optional(),
       ordering: z.string().optional(),
       custom_fields__icontains: z.string().optional(),
-      paperless_filters: z
-        .record(
-          z.string(),
-          z.union([
-            z.string(),
-            z.number(),
-            z.boolean(),
-            z.array(z.union([z.string(), z.number(), z.boolean()])),
-          ])
-        )
-        .optional(),
+      // The shared schema, not a hand-copied union: search_passages and
+      // query_documents must advertise identical filter shapes, and a copy here
+      // is how they drifted before (this site kept the bare, unbounded union
+      // after documentQuery.ts gained bounds). Importing it also carries the
+      // CVE-2023-54404 array cap into this tool.
+      paperless_filters: paperlessFiltersSchema.optional(),
     },
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");

@@ -97,15 +97,38 @@ export const customFieldQuerySchema = z
     }
   }) as unknown as z.ZodType<CustomFieldQuery>;
 
+/**
+ * Upper bound on one paperless_filters *value*, in characters.
+ *
+ * A documented filter value is a date, an id, a slug or a name. 1024 is already
+ * far past any of those, and it is the bound that matters for #138: a union of
+ * *unchecked* primitives collapses to the array-form `type: ["string","number"]`
+ * in zod >= 4.5, which strict MCP clients reject and silently drop the whole
+ * tool over. Any real constraint on any member keeps the union emitting `anyOf`.
+ */
+const MAX_PAPERLESS_FILTER_VALUE_CHARS = 1024;
+
+/**
+ * Upper bound on one paperless_filters list — i.e. an `__in`-style id list.
+ *
+ * This is the CVE-2023-54404 (GHSA-mrhx-c7xc-m3w5) defence. zod's array
+ * validator accumulates one issue object per failing element with no cap, so an
+ * oversized array of wrong-typed values is an unbounded-memory path (measured:
+ * 2,000,000 issues). A length check is only an effective defence from 4.6.6 on,
+ * because before that the element loop ran first. 500 ids is well past any real
+ * query and far below anything that could exhaust memory.
+ */
+export const MAX_PAPERLESS_FILTER_VALUES = 500;
+
 const paperlessFilterScalarSchema = z.union([
-  z.string(),
+  z.string().max(MAX_PAPERLESS_FILTER_VALUE_CHARS),
   z.number(),
   z.boolean(),
 ]);
 
 export const paperlessFilterValueSchema = z.union([
   paperlessFilterScalarSchema,
-  z.array(paperlessFilterScalarSchema),
+  z.array(paperlessFilterScalarSchema).max(MAX_PAPERLESS_FILTER_VALUES),
 ]);
 
 export const paperlessFiltersSchema = z.record(z.string(), paperlessFilterValueSchema);

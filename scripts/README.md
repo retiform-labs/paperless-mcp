@@ -94,29 +94,18 @@ On a hit the gate prints `path:line: [category] matched <first-4>…(N chars)`.
 It never prints the matched value. Logs get pasted into chat, kept in CI and
 mailed around; a report that quotes the secret is a second copy of the leak.
 
-### CI
+### Where the gate runs, and where it must not
 
-`prepublishOnly` is wired in `package.json`, so a real `npm publish` runs the
-gate automatically. **It is not enough on its own** — measured on npm 10.9.7:
+**The gate is LOCAL ONLY. It is deliberately not wired into `prepublishOnly`.**
 
-| command | runs `prepublishOnly`? |
-|---|---|
-| `npm publish` | yes |
-| `npm publish --dry-run` | yes |
-| `npm pack --dry-run` | **no** |
+The pattern file holds vocabulary that must never be published -- the same restricted-practice terms the gate exists to keep out of the tree. It therefore cannot be committed, and a GitHub Actions runner has no copy of it. Wiring the gate into `prepublishOnly` makes publishing *structurally impossible* in CI: the gate correctly refuses to report clean without its rules, npm aborts, and the release fails about twenty seconds in. That is the gate working and the wiring being wrong, and it happened once -- see the 2.4.1 release run.
 
-`prepublishOnly` also fires **before** `prepack`, so at that moment `build/`
-does not exist yet and the gate would be inspecting a 3-file subset, then exit 2
-on the incompleteness check. That is the correct verdict, but it means the
-`prepublishOnly` slot can only pass when `build/` already exists.
+| context | gate | why |
+|---|---|---|
+| local, before `git push` | the `pre-push` hook | patterns are present |
+| local, before `npm publish` | `npm run release:gate` | patterns are present |
+| CI (`changesets/action`) | **not run** | patterns cannot exist there |
 
-**Recommendation:** invoke the gate explicitly as its own CI step, *after*
-`npm run build`, so the enumerated set is complete and the check is not
-entangled with the build:
+`prepublishOnly` runs `npm run build` only. The pre-push hook remains the enforcement point that matters, because the hook sees the **commits**, and a leak in a commit is the leak that reaches the registry even when the working tree is clean.
 
-    - run: npm ci
-    - run: npm run build
-    - run: bash scripts/opsec-preflight.sh   # gate on the real published set
-
-In CI, supply the pattern file from a repository secret rather than a checked-in
-file — write it to a temp path with mode 600 and point `OPSEC_PATTERNS` at it.
+If you ever do need the gate in CI, it has to come from a repository secret written to a mode-600 temp path with `OPSEC_PATTERNS` pointing at it -- and that trade puts the private vocabulary into a second system. Prefer the hook.

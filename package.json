@@ -19,7 +19,8 @@
     "eval": "node eval/run.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "sync-manifest-tools": "node scripts/sync-manifest-tools.mjs",
-    "prepublishOnly": "npm run build && npm run opsec-preflight"
+    "prepublishOnly": "npm run build",
+    "release:gate": "npm run build && npm run opsec-preflight"
   },
   "keywords": [
     "mcp",

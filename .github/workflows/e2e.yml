@@ -23,10 +23,20 @@ jobs:
           # users still on Paperless-ngx v2.
           - series: "2.x"
             paperless_image: ghcr.io/paperless-ngx/paperless-ngx:2.20
-          # Upstream stable (currently v3.x). The weekly schedule catches drift
-          # when a new :latest is published.
-          - series: "3.x (latest)"
-            paperless_image: ghcr.io/paperless-ngx/paperless-ngx:latest
+          # Upstream stable (currently v3.x). PINNED, not :latest.
+          #
+          # This was :latest so the weekly schedule would catch drift. What it
+          # actually caught was ambiguity: a red run could not be attributed to
+          # our change or to an upstream release, because the two landed on the
+          # same moving tag. Measured 2026-11-16 pass on v3.4.2 and 2026-11-17
+          # fail on v3.5.0 with no change of ours in between, and proving that
+          # took a control run of the same workflow on main.
+          #
+          # Bump this deliberately when adopting a new upstream release. Drift
+          # detection is then a scheduled job that OPENS AN ISSUE, not a PR check
+          # that goes red for reasons the author cannot see.
+          - series: "3.x"
+            paperless_image: ghcr.io/paperless-ngx/paperless-ngx:3.4.2
 
     services:
       redis:

@@ -163,3 +163,52 @@ test("an unknown group operator is rejected rather than treated as a field name"
     );
   }
 });
+
+test("a hostile leaf VALUE is rejected, not waved through", () => {
+  // MEASURED GAP, closed here. Replacing isCustomFieldQueryValue with a bare
+  //  left the whole suite green, so nothing tested the leaf at all:
+  // the recursion and the clause cap were covered, the value shape was not.
+  //
+  // These are the shapes a model will actually emit, and every one of them must
+  // be a validation error rather than a query string sent to Paperless. A
+  // three-element array whose third element is an object, or undefined, would
+  // otherwise reach the request builder and be coerced into a GET parameter.
+  const hostileLeaves: unknown[] = [
+    ["tag", "exact", { nested: 1 }],
+    ["tag", "exact", undefined],
+    ["tag", "exact", ["a", {}]],
+    ["tag", "exact", [1, [2]]],
+    ["tag", "exact", () => 1],
+    ["tag", "exact", Symbol("s")],
+  ];
+
+  for (const leaf of hostileLeaves) {
+    const result = customFieldQuerySchema.safeParse(leaf);
+    assert.equal(
+      result.success,
+      false,
+      "custom_field_query accepted a hostile leaf VALUE: " + JSON.stringify(leaf)
+    );
+  }
+});
+
+test("a well-formed leaf VALUE is accepted (the control for the test above)", () => {
+  // Without this, the assertion above could pass on a validator that rejects
+  // everything -- a false green of the opposite kind.
+  const goodLeaves: unknown[] = [
+    ["tag", "exact", "x"],
+    ["tag", "exact", 42],
+    ["tag", "exact", true],
+    ["tag", "exact", null],
+    ["tag", "exact", ["a", 1, true, null]],
+  ];
+
+  for (const leaf of goodLeaves) {
+    const result = customFieldQuerySchema.safeParse(leaf);
+    assert.equal(
+      result.success,
+      true,
+      "custom_field_query refused a WELL-FORMED leaf: " + JSON.stringify(leaf)
+    );
+  }
+});

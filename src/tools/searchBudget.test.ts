@@ -6,7 +6,7 @@
 // after, 386 new lines. Its own commit message named the gap: "budget arithmetic
 // with no test is arithmetic nobody has falsified."
 //
-// WHY THE NUMBER IS LOAD-BEARING: Mneme truncates any non-memory tool result at
+// WHY THE NUMBER IS LOAD-BEARING: MCP clients commonly truncate a tool result at
 // MAX_RESULT_CHARS by taking head and tail, and the agent cannot detect that it
 // happened. A passage silently cut reads exactly like a short one, so the tool
 // must bound itself BELOW the ceiling rather than trust the caller to do it.

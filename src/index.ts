@@ -29,6 +29,16 @@ const resolvedBaseUrl = baseUrl || process.env.PAPERLESS_URL;
 const resolvedToken = token || process.env.PAPERLESS_API_KEY;
 const resolvedPublicUrl =
   publicUrl || process.env.PAPERLESS_PUBLIC_URL || resolvedBaseUrl;
+/**
+ * Default request-body ceiling for the HTTP transport, in bytes.
+ *
+ * Sized from the largest legal tool payload rather than picked: post_document
+ * accepts 100 MB of file content, base64 encoding inflates that by 4/3, and the
+ * JSON envelope adds a little more. 140 MB covers that with headroom and is
+ * still a hard bound.
+ */
+const DEFAULT_MAX_BODY_BYTES = 140 * 1024 * 1024;
+
 const resolvedPort = port ? parseInt(port, 10) : 3000;
 
 if (!resolvedBaseUrl) {
@@ -86,7 +96,28 @@ async function main() {
     }
 
     const app = express();
-    app.use(express.json());
+    // express.json() defaults to a 100 kb body. That is smaller than this
+    // server's own permitted upload: post_document accepts a base64 `file` of up to
+    // MAX_FILE_SIZE_BYTES (100 MB), and base64 inflates the payload by 4/3, so a
+    // legal document was being rejected by the transport before the tool ever
+    // saw it -- and, before the error handler below existed, with an HTML stack
+    // trace rather than a JSON-RPC error.
+    //
+    // The limit is therefore RAISED rather than removed: an unbounded body is a
+    // memory-exhaustion path, which is the same class of defect this release is
+    // fixing elsewhere. It stays overridable because a deployment that only uses
+    // file_path uploads should be able to keep the tighter bound.
+    const maxBodyBytes = Number(
+      process.env.PAPERLESS_MCP_MAX_BODY_BYTES ?? String(DEFAULT_MAX_BODY_BYTES)
+    );
+    app.use(
+      express.json({
+        limit:
+          Number.isFinite(maxBodyBytes) && maxBodyBytes > 0
+            ? maxBodyBytes
+            : DEFAULT_MAX_BODY_BYTES,
+      })
+    );
 
     // Store transports for each session
     const sseTransports: Record<string, SSEServerTransport> = {};
@@ -194,6 +225,38 @@ async function main() {
         res.status(400).send("No transport found for sessionId");
       }
     });
+
+    // A malformed or oversized request is rejected by express.json() BEFORE any
+    // route handler runs, so it reaches express default error handler rather
+    // than sendUnauthorized. When NODE_ENV is not production that handler
+    // renders err.stack into a text/html body, and the body goes to a caller
+    // that has NOT authenticated -- handing them absolute paths, dependency
+    // versions and internal module names. The Dockerfile sets no NODE_ENV, so
+    // in the shipped image that is the live behaviour.
+    //
+    // This handler answers with the status the error already carries (400 for a
+    // JSON parse failure, 413 for an oversized body, 415 for an unsupported
+    // charset) and a fixed minimal body, so the response no longer depends on
+    // NODE_ENV. It is deliberately placed after every route: express only
+    // consults a four-argument handler for errors, so ordering it last keeps
+    // the routes untouched.
+    app.use(
+      (
+        error: Error & { status?: number; statusCode?: number; type?: string },
+        _req: express.Request,
+        res: express.Response,
+        next: express.NextFunction
+      ) => {
+        if (res.headersSent) {
+          next(error);
+          return;
+        }
+        const status =
+          error.status ?? error.statusCode ?? (error.type === "entity.too.large" ? 413 : 400);
+        console.error("[paperless-mcp] Rejected request: " + error.message);
+        res.status(status).json({ error: "invalid request" });
+      }
+    );
 
     app.listen(resolvedPort, () => {
       console.log(

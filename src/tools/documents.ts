@@ -13,6 +13,7 @@ import {
   LIST_DOCUMENTS_ARGS_SHAPE,
   QUERY_DOCUMENTS_ARGS_SHAPE,
   SEARCH_DOCUMENTS_ARGS_SHAPE,
+  paperlessFiltersSchema,
 } from "./utils/documentQuery";
 import { withErrorHandling } from "./utils/middlewares";
 import { validateCustomFields } from "./utils/monetary";
@@ -177,12 +178,29 @@ export function buildSearchPassage(
   // risks cutting a window that does not contain the actual hit.
   const lowerFull = full.toLowerCase();
   let center = -1;
+  let anchorLength = 0;
   if (searchHit?.highlights) {
-    for (const phrase of extractHighlightPhrases(searchHit.highlights)) {
-      const idx = lowerFull.indexOf(phrase.toLowerCase());
+    // Prefer the WHOLE decoded highlight when the stored text contains it
+    // verbatim. The window has to be wide enough for the phrase a caller sees
+    // quoted in the highlights field, and that phrase is the unit -- not one
+    // word out of it. The fragment list below stays as the fallback for a
+    // stemmed match that appears in no verbatim form at all.
+    const whole = decodeHighlightText(searchHit.highlights);
+    if (whole.length >= 4) {
+      const idx = lowerFull.indexOf(whole.toLowerCase());
       if (idx >= 0) {
         center = idx;
-        break;
+        anchorLength = whole.length;
+      }
+    }
+    if (center < 0) {
+      for (const phrase of extractHighlightPhrases(searchHit.highlights)) {
+        const idx = lowerFull.indexOf(phrase.toLowerCase());
+        if (idx >= 0) {
+          center = idx;
+          anchorLength = phrase.length;
+          break;
+        }
       }
     }
   }
@@ -198,13 +216,23 @@ export function buildSearchPassage(
       const idx = lowerFull.indexOf(term.toLowerCase());
       if (idx >= 0) {
         center = idx;
+        anchorLength = term.length;
         break;
       }
     }
   }
   const resolved = center < 0 ? 0 : center;
   const start = Math.max(0, resolved - Math.floor(window / 2));
-  const passage = full.slice(start, start + window);
+  // The end is widened only when doing so is required to CONTAIN the phrase it
+  // is anchoring on, exactly as buildPassage in search.ts does. A window that
+  // stops one character short of the match it was centred for is the containment
+  // defect this builder exists to avoid, and with an anchor longer than the
+  // requested window the plain start-plus-window slice produces precisely that,
+  // while the returned highlights field still quotes the full phrase. The two
+  // functions are documented as mirror images, so the widening has to exist in
+  // both or the mirror lies.
+  const anchorEnd = resolved + anchorLength;
+  const passage = full.slice(start, Math.max(start + window, anchorEnd));
   return {
     id: doc.id,
     title: doc.title,
@@ -221,7 +249,7 @@ export function buildSearchPassage(
  * four characters cannot anchor a window reliably and are skipped so stray
  * short matches never drag the window to a wrong position.
  */
-export function extractHighlightPhrases(highlights: string): string[] {
+export function decodeHighlightText(highlights: string): string {
   const text = highlights
     .replace(/<[^>]*>/g, " ")
     .replace(/&lt;/g, "<")
@@ -234,6 +262,11 @@ export function extractHighlightPhrases(highlights: string): string[] {
     .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ")
     .trim();
+  return text;
+}
+
+export function extractHighlightPhrases(highlights: string): string[] {
+  const text = decodeHighlightText(highlights);
   if (!text) return [];
   // Prefer the longest surrounding run of substantial words: the hit phrase,
   // not a lone term that can match anywhere.
@@ -758,17 +791,12 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
       created__date__lte: z.string().optional(),
       ordering: z.string().optional(),
       custom_fields__icontains: z.string().optional(),
-      paperless_filters: z
-        .record(
-          z.string(),
-          z.union([
-            z.string(),
-            z.number(),
-            z.boolean(),
-            z.array(z.union([z.string(), z.number(), z.boolean()])),
-          ])
-        )
-        .optional(),
+      // The shared schema, not a hand-copied union: search_passages and
+      // query_documents must advertise identical filter shapes, and a copy here
+      // is how they drifted before (this site kept the bare, unbounded union
+      // after documentQuery.ts gained bounds). Importing it also carries the
+      // CVE-2023-54404 array cap into this tool.
+      paperless_filters: paperlessFiltersSchema.optional(),
     },
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");

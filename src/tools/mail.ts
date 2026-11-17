@@ -17,6 +17,22 @@ const CONSUMPTION_SCOPE_DESCRIPTION =
 const PDF_LAYOUT_DESCRIPTION =
   "PDF layout for full-mail consumption: 0=System default, 1=Text then HTML, 2=HTML then text, 3=HTML only, 4=Text only";
 
+/**
+ * Max length of a mail-rule string filter, in characters.
+ *
+ * 256 is what Paperless itself declares for every string on a mail rule
+ * (maxLength: 256 on folder, filter_from/to/subject/body and both
+ * attachment-filename filters), so this is the server's own bound rather than
+ * one invented here.
+ *
+ * It is also load-bearing for #138: `z.string().nullable()` is an *unchecked*
+ * union member, and zod >= 4.5's JSON-Schema converter collapses that to the
+ * array-form `type: ["string","null"]` — which strict MCP clients reject and
+ * silently drop the entire tool over. `z.string().max(256).nullable()` emits
+ * `anyOf` instead.
+ */
+const MAIL_RULE_STRING_MAX = 256;
+
 const mailRuleFields = {
   name: z.string().optional(),
   account: z.number().int().optional(),
@@ -26,8 +42,8 @@ const mailRuleFields = {
   filter_to: z.string().max(256).nullable().optional(),
   filter_subject: z.string().max(256).nullable().optional(),
   filter_body: z.string().max(256).nullable().optional(),
-  filter_attachment_filename_include: z.string().nullable().optional(),
-  filter_attachment_filename_exclude: z.string().nullable().optional(),
+  filter_attachment_filename_include: z.string().max(MAIL_RULE_STRING_MAX).nullable().optional(),
+  filter_attachment_filename_exclude: z.string().max(MAIL_RULE_STRING_MAX).nullable().optional(),
   maximum_age: z.number().int().min(0).optional(),
   action: z
     .number()
@@ -36,7 +52,11 @@ const mailRuleFields = {
     .max(5)
     .optional()
     .describe(MAIL_RULE_ACTION_DESCRIPTION),
-  action_parameter: z.string().nullable().optional(),
+  // The action parameter carries a folder id/name, a tag id or a correspondent
+  // id depending on `action`, so 256 is the same bound `folder` itself carries
+  // upstream. Bounding it keeps this union emitting `anyOf` (see
+  // MAIL_RULE_STRING_MAX) as well as capping what a caller can push through.
+  action_parameter: z.string().max(MAIL_RULE_STRING_MAX).nullable().optional(),
   assign_title_from: z
     .number()
     .int()

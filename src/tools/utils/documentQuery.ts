@@ -58,8 +58,31 @@ function isCustomFieldQueryGroupOperator(
   );
 }
 
-function isCustomFieldQuery(value: unknown): value is CustomFieldQuery {
+/**
+ * Recursion and size bounds for `custom_field_query`.
+ *
+ * The validator is recursive, so without a depth bound a caller chooses how
+ * deep the stack goes -- and at roughly 2900 nested groups on this runtime the
+ * call throws `RangeError: Maximum call stack size exceeded` INSTEAD of
+ * returning a validation error. A thrown RangeError escapes `safeParse` and
+ * surfaces to the MCP client as an internal error, so the caller learns nothing
+ * about what was wrong and the failure looks like a server fault.
+ *
+ * The clause count matters for a different reason: the validated tree becomes
+ * a GET query string, and a group may hold any number of clauses, so the caller
+ * also chooses how large a URL we attempt to send. Eight levels and sixty-four
+ * clauses are far past anything a real Paperless filter needs and comfortably
+ * inside every default URL limit.
+ */
+const MAX_CUSTOM_FIELD_QUERY_DEPTH = 8;
+const MAX_CUSTOM_FIELD_QUERY_CLAUSES = 64;
+
+function isCustomFieldQuery(value: unknown, depth = 0): value is CustomFieldQuery {
   if (!Array.isArray(value)) {
+    return false;
+  }
+
+  if (depth > MAX_CUSTOM_FIELD_QUERY_DEPTH) {
     return false;
   }
 
@@ -79,7 +102,10 @@ function isCustomFieldQuery(value: unknown): value is CustomFieldQuery {
     Array.isArray(value[1]) &&
     value[1].length >= 1
   ) {
-    return value[1].every((item) => isCustomFieldQuery(item));
+    return (
+      value[1].length <= MAX_CUSTOM_FIELD_QUERY_CLAUSES &&
+      value[1].every((item) => isCustomFieldQuery(item, depth + 1))
+    );
   }
 
   return false;
@@ -92,20 +118,48 @@ export const customFieldQuerySchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          "Invalid custom_field_query. Use [field_name_or_id, operator, value] or ['AND'|'OR', [clause1, clause2]].",
+          "Invalid custom_field_query. Use [field_name_or_id, operator, value] or " +
+          "['AND'|'OR', [clause1, clause2]], nested at most " +
+          MAX_CUSTOM_FIELD_QUERY_DEPTH +
+          " levels deep with at most " +
+          MAX_CUSTOM_FIELD_QUERY_CLAUSES +
+          " clauses per group.",
       });
     }
   }) as unknown as z.ZodType<CustomFieldQuery>;
 
+/**
+ * Upper bound on one paperless_filters *value*, in characters.
+ *
+ * A documented filter value is a date, an id, a slug or a name. 1024 is already
+ * far past any of those, and it is the bound that matters for #138: a union of
+ * *unchecked* primitives collapses to the array-form `type: ["string","number"]`
+ * in zod >= 4.5, which strict MCP clients reject and silently drop the whole
+ * tool over. Any real constraint on any member keeps the union emitting `anyOf`.
+ */
+const MAX_PAPERLESS_FILTER_VALUE_CHARS = 1024;
+
+/**
+ * Upper bound on one paperless_filters list — i.e. an `__in`-style id list.
+ *
+ * This is the CVE-2023-54404 (GHSA-mrhx-c7xc-m3w5) defence. zod's array
+ * validator accumulates one issue object per failing element with no cap, so an
+ * oversized array of wrong-typed values is an unbounded-memory path (measured:
+ * 2,000,000 issues). A length check is only an effective defence from 4.6.6 on,
+ * because before that the element loop ran first. 500 ids is well past any real
+ * query and far below anything that could exhaust memory.
+ */
+export const MAX_PAPERLESS_FILTER_VALUES = 500;
+
 const paperlessFilterScalarSchema = z.union([
-  z.string(),
+  z.string().max(MAX_PAPERLESS_FILTER_VALUE_CHARS),
   z.number(),
   z.boolean(),
 ]);
 
 export const paperlessFilterValueSchema = z.union([
   paperlessFilterScalarSchema,
-  z.array(paperlessFilterScalarSchema),
+  z.array(paperlessFilterScalarSchema).max(MAX_PAPERLESS_FILTER_VALUES),
 ]);
 
 export const paperlessFiltersSchema = z.record(z.string(), paperlessFilterValueSchema);

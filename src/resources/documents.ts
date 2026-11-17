@@ -116,9 +116,24 @@ function assertPaperlessDocumentsUri(uri: URL): void {
   }
 }
 
+/**
+ * Parses the id out of a resource URI.
+ *
+ * The shape is checked BEFORE the conversion, because Number() is a productive
+ * coercer and every one of its extras is a silent reinterpretation of a caller
+ * identifier: "0x10" becomes 16, "1e3" becomes 1000, and "5.0", "+5" and
+ * " 5 " all become 5. A caller that wrote one document id and received a
+ * different document would have no way to notice, so the canonical decimal form
+ * is required and anything else is refused rather than rewritten.
+ *
+ * The safe-integer bound matters for the same reason one rung up: past 2^53 two
+ * distinct digit strings collapse onto the same number, so an unbounded id can
+ * address a document the caller did not name.
+ */
 function parseDocumentId(idValue: string): number {
-  const id = Number(idValue);
-  if (!Number.isInteger(id) || id <= 0) {
+  const canonical = /^[1-9][0-9]*$/.test(idValue);
+  const id = canonical ? Number(idValue) : Number.NaN;
+  if (!canonical || !Number.isSafeInteger(id) || id <= 0) {
     throw new Error(`Invalid Paperless document id in resource URI: ${idValue}`);
   }
   return id;

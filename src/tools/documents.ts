@@ -44,8 +44,18 @@ const ALLOWED_UPLOAD_PATHS = process.env.PAPERLESS_MCP_UPLOAD_PATHS
 /** Default number of characters returned by a bounded content read. */
 export const DEFAULT_CONTENT_MAX_CHARS = 8000;
 
-/** Hard cap on characters a single tool response may inline. */
-export const DEFAULT_MAX_INLINE_CHARS = 50000;
+/**
+ * Hard cap on characters a single tool response may inline.
+ *
+ * 20,000 matches the client-side truncation ceiling our primary consumer
+ * applies (`DEFAULT_MAX_TOOL_RESULT_LENGTH`), and it matches the search path's
+ * own `MAX_RESULT_CHARS`. It was 50,000, which is 2.5x the consumer's limit —
+ * a budget above the one your reader enforces is not a budget: the response
+ * was built whole and then mangled downstream, silently, with the caller
+ * unable to detect it. Bounding at the source is the only honest option for a
+ * published server, since we cannot fix the client.
+ */
+export const DEFAULT_MAX_INLINE_CHARS = 20000;
 
 /** Default passage size for search_passages. */
 export const DEFAULT_PASSAGE_WINDOW = 800;
@@ -141,7 +151,7 @@ export function sliceDocumentContent(
  * crosses this boundary un-sliced. Anchoring prefers the server's own
  * highlighted phrase — the only anchor that survives whoosh stemming, since
  * the index may match word variants the stored text does not contain
- * verbatim — then falls back to the first verbatim term occurrence, and
+ * verbatim — then falls back to the LONGEST matching verbatim term, and
  * finally to the head of the document rather than returning nothing.
  */
 export function buildSearchPassage(
@@ -177,7 +187,14 @@ export function buildSearchPassage(
     }
   }
   if (center < 0) {
-    for (const term of terms) {
+    // The FALLBACK walks terms LONGEST-FIRST, matching buildPassage in
+    // search.ts. Walking query order here meant "the practice of a wrathful
+    // deity with a lion head" anchored on "the" at character 3 whenever the
+    // server's highlight did not resolve -- and because the highlight usually
+    // DOES resolve on this path, the two tools silently disagreed about where
+    // a window belongs while the README described them as mirror images.
+    // Length is the cheap correct proxy for the most distinctive term.
+    for (const term of [...terms].sort((a, b) => b.length - a.length)) {
       const idx = lowerFull.indexOf(term.toLowerCase());
       if (idx >= 0) {
         center = idx;
@@ -244,7 +261,7 @@ export function extractHighlightPhrases(highlights: string): string[] {
 export function extractSearchTerms(query: string): string[] {
   const terms = query
     .toLowerCase()
-    .split(/[^\p{L}\p{N}_]+/u)
+    .split(/[^\p{L}\p{N}\p{M}_]+/u)
     .filter((term) => term.length > 0);
   return terms;
 }
@@ -712,7 +729,7 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
 
   server.tool(
     "search_passages",
-    "Search documents full-text and return bounded text passages around each hit instead of whole documents. The window is anchored on the server's own highlighted phrase (falling back to the first verbatim term, then the document head), so the returned passage contains the actual hit even when stemming matched a word variant. Queries that the server rejects with an HTTP 400 are retried once with a defensively rewritten query (apostrophes and stray quotes removed); such responses carry query_sanitized: true. Returns document id, title, score, offset, content_length, and the highlighted snippet. Use this to locate and skim evidence across many documents without flooding context; page further with get_document_content offsets.",
+    "Search documents full-text and return bounded text passages around each hit instead of whole documents. The window is anchored on the server's own highlighted phrase (falling back to the LONGEST matching query term, then the document head), so the returned passage contains the actual hit even when stemming matched a word variant. Queries that the server rejects with an HTTP 400 are retried once with a defensively rewritten query (apostrophes and stray quotes removed); such responses carry query_sanitized: true. Returns document id, title, score, offset, content_length, and the highlighted snippet. Use this to locate and skim evidence across many documents without flooding context; page further with get_document_content offsets.",
     {
       query: z
         .string()

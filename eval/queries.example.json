@@ -1,0 +1,55 @@
+{
+  "$comment": "EXAMPLE fixture. Copy to queries.json and replace with cases drawn from your own corpus. The schema is the contract: `id` is the expected Paperless document id, `query` is written the way a user would ask it, `target_title` must be the document's real title, and `anchors` are substrings that must appear verbatim in the retrieved passage. run.mjs refuses to score if any anchor is absent from the target document, because a fixture scored against a false premise measures nothing.",
+  "cases": [
+    {
+      "id": 1,
+      "query": "a procedure for replacing a brake caliper on a light truck",
+      "target_title": "Automotive Service Manual",
+      "anchors": [
+        "brake",
+        "caliper",
+        "torque"
+      ]
+    },
+    {
+      "id": 2,
+      "query": "how much protein a strength athlete needs per kilogram of bodyweight",
+      "target_title": "Sports Nutrition Textbook",
+      "anchors": [
+        "protein",
+        "athlete",
+        "kilogram"
+      ]
+    },
+    {
+      "id": 3,
+      "query": "the difference between a fixed and a floating exchange rate",
+      "target_title": "Introductory Macroeconomics",
+      "anchors": [
+        "exchange rate",
+        "fixed",
+        "floating"
+      ]
+    },
+    {
+      "id": 4,
+      "query": "a legal test for whether a contract term is unconscionable",
+      "target_title": "Contracts Casebook",
+      "anchors": [
+        "unconscionable",
+        "contract",
+        "term"
+      ]
+    },
+    {
+      "id": 5,
+      "query": "symptoms that distinguish a tension headache from a migraine",
+      "target_title": "Clinical Neurology Handbook",
+      "anchors": [
+        "headache",
+        "migraine",
+        "symptoms"
+      ]
+    }
+  ]
+}

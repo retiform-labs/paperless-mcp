@@ -20,12 +20,32 @@ import {
 } from "./documents";
 import { createDocument } from "../test/mocks/paperlessApi";
 
-function parseToolText(result: CallToolResult) {
+/**
+ * Read a tool result as JSON, or as prose if it is not JSON.
+ *
+ * ⚠️ "EVERY TOOL TEXT IS JSON" WAS UNDER-DECLARED, and this helper is where that
+ * showed up. It was true only because every error happened to be a serialised
+ * blob. When error payloads became actionable sentences (the MCP spec asks for
+ * tool execution errors a model can self-correct from), a bare `json.parse`
+ * threw a SyntaxError *before* the assertions ran -- so three tests failed on
+ * the parse, not on the behaviour they exist to check, and the error text a
+ * caller now sees was never actually asserted.
+ *
+ * Errors are prose; successes are JSON. Say so, and let the caller read either.
+ * Success paths still get a parsed object, so `?.error` and property access keep
+ * working; an error path yields the sentence itself plus an `error` field, so
+ * both `parseToolText(r)?.error` and a bare `.match` on the text stay valid.
+ */
+function parseToolText(result: CallToolResult): any {
   const item = result.content?.[0];
   if (!item || item.type !== "text") {
     throw new Error("Expected text tool response");
   }
-  return JSON.parse(item.text);
+  try {
+    return JSON.parse(item.text);
+  } catch {
+    return { error: item.text };
+  }
 }
 
 class TestTransport {
@@ -168,8 +188,23 @@ describe("getMaxInlineChars", () => {
     delete process.env[KEY];
   });
 
-  test("defaults to 50000 without configuration", () => {
+  // Asserts against the CONSTANT, not a literal, so a deliberate change to the
+  // default does not make this red. The previous name said "50000" while the
+  // assertion was already constant-relative -- a name that lies about its own
+  // body is a surface, the same class as a stale doc comment.
+  test("defaults to DEFAULT_MAX_INLINE_CHARS without configuration", () => {
     assert.equal(getMaxInlineChars(), DEFAULT_MAX_INLINE_CHARS);
+  });
+
+  // The default is a CEILING OUR CONSUMER ALSO ENFORCES, not a free choice: a
+  // budget above the reader's is a budget that gets applied downstream by
+  // truncation the caller cannot detect. Pinned so lowering it further, or
+  // raising it back, is a deliberate act with a failing test attached.
+  test("the inline default does not exceed the client truncation ceiling", () => {
+    assert.ok(
+      DEFAULT_MAX_INLINE_CHARS <= 20000,
+      `inline budget ${DEFAULT_MAX_INLINE_CHARS} exceeds the 20000-char ceiling most MCP clients apply`
+    );
   });
 
   test("reads the environment at call time", () => {

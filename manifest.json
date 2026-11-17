@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "@retiform/paperless-mcp",
   "display_name": "Paperless-ngx",
-  "version": "2.3.5",
+  "version": "2.4.0",
   "description": "Model Context Protocol (MCP) server for interacting with Paperless-NGX document management system. Enables AI assistants to manage documents, tags, correspondents, and document types through the Paperless-NGX API.",
   "author": {
     "name": "Guan",
@@ -27,56 +27,196 @@
   },
   "tools": [
     {
-      "name": "list_documents",
-      "description": "Get a paginated list of all documents."
+      "name": "bulk_edit_correspondents",
+      "description": "Bulk edit correspondents. ⚠️ WARNING: 'delete' operation permanently removes correspondents from the entire system."
     },
     {
-      "name": "get_document",
-      "description": "Get a specific document by ID."
+      "name": "bulk_edit_custom_fields",
+      "description": "Bulk edit custom fields. ⚠️ WARNING: 'delete' operation permanently removes custom fields from the entire system."
     },
     {
-      "name": "search_documents",
-      "description": "Full-text search across documents."
-    },
-    {
-      "name": "download_document",
-      "description": "Download a document file by ID."
-    },
-    {
-      "name": "get_document_thumbnail",
-      "description": "Get a document thumbnail (image preview) by ID."
+      "name": "bulk_edit_document_types",
+      "description": "Bulk edit document types. ⚠️ WARNING: 'delete' operation permanently removes document types from the entire system."
     },
     {
       "name": "bulk_edit_documents",
-      "description": "Perform bulk operations on multiple documents."
+      "description": "Perform bulk operations on multiple documents. Note: 'remove_tag' removes a tag from specific documents (tag remains in system), while 'delete_tag' permanently deletes a tag from the entire system. ⚠️ WARNING: 'delete' method permanently deletes documents and requires confirmation."
     },
     {
-      "name": "post_document",
-      "description": "Upload a new document to Paperless-NGX."
-    },
-    {
-      "name": "list_tags",
-      "description": "Get all tags."
-    },
-    {
-      "name": "create_tag",
-      "description": "Create a new tag."
-    },
-    {
-      "name": "list_correspondents",
-      "description": "Get all correspondents."
+      "name": "bulk_edit_tags",
+      "description": "Bulk edit tags. ⚠️ WARNING: 'delete' operation permanently removes tags from the entire system. Use with caution."
     },
     {
       "name": "create_correspondent",
-      "description": "Create a new correspondent."
+      "description": "Create a new correspondent with optional matching pattern and algorithm for automatic document assignment."
     },
     {
-      "name": "list_document_types",
-      "description": "Get all document types."
+      "name": "create_custom_field",
+      "description": "Create a new custom field with a specified data type (string, url, date, boolean, integer, float, monetary, documentlink, or select). For monetary fields, values must use currency code prefix format (e.g., USD10.00, GBP123.45) — NOT trailing symbol format (e.g., 10.00$)."
+    },
+    {
+      "name": "create_document_note",
+      "description": "Add a note to a document. Use this to record an audit trail or progress note directly on the document. Returns the document's full list of notes after the note is added."
     },
     {
       "name": "create_document_type",
-      "description": "Create a new document type."
+      "description": "Create a new document type with optional matching pattern and algorithm for automatic document classification."
+    },
+    {
+      "name": "create_mail_rule",
+      "description": "Create a Paperless mail rule. Use list_mail_accounts first to choose account. Prefer attachment-only rules for invoices unless the full mail must be archived."
+    },
+    {
+      "name": "create_tag",
+      "description": "Create a new tag with optional color, matching pattern, and matching algorithm for automatic document tagging."
+    },
+    {
+      "name": "delete_correspondent",
+      "description": "⚠️ DESTRUCTIVE: Permanently delete a correspondent from the entire system. This will affect ALL documents that use this correspondent."
+    },
+    {
+      "name": "delete_custom_field",
+      "description": "⚠️ DESTRUCTIVE: Permanently delete a custom field from the entire system. This will remove the field from ALL documents that use it."
+    },
+    {
+      "name": "delete_document_note",
+      "description": "⚠️ DESTRUCTIVE: Permanently delete a single note from a document by its note ID. This operation is irreversible. Returns the document's remaining notes."
+    },
+    {
+      "name": "delete_document_type",
+      "description": "⚠️ DESTRUCTIVE: Permanently delete a document type from the entire system. This will affect ALL documents that use this type."
+    },
+    {
+      "name": "delete_mail_rule",
+      "description": "Delete one Paperless mail rule. This changes future mail ingestion behavior but does not delete documents."
+    },
+    {
+      "name": "delete_tag",
+      "description": "⚠️ DESTRUCTIVE: Permanently delete a tag from the entire system. This will remove the tag from ALL documents that use it. Use with extreme caution."
+    },
+    {
+      "name": "download_document",
+      "description": "Download a document file by ID. Returns a paperless:// resource URI; read the resource to fetch the file content."
+    },
+    {
+      "name": "embedding_status",
+      "description": "Report what the local semantic-search index actually holds: document and chunk counts, embedding dimensions, the model and prefix mode it was built with, when it last synced, how many documents are pending, how much disk the index uses, and whether any documents were truncated at the chunk cap. Use this before trusting semantic_search, and to tell 'the index is empty' apart from 'nothing matched'."
+    },
+    {
+      "name": "get_correspondent",
+      "description": "Get a specific correspondent by ID with full details including matching rules."
+    },
+    {
+      "name": "get_custom_field",
+      "description": "Get a specific custom field by ID with full details including data type and extra configuration."
+    },
+    {
+      "name": "get_document",
+      "description": "Get a specific document by ID with full details including correspondent, document type, tags, and custom fields. Note: Document content is excluded from results by default. Use 'get_document_content' to retrieve content when needed."
+    },
+    {
+      "name": "get_document_content",
+      "description": "Get the text content of a specific document by ID, in bounded windows. Returns at most max_chars characters (default 8000) starting at offset, plus content_length and pagination metadata so callers can page through long documents. Use offset + max_chars to read successive windows of a long document; use the download_document resource for bulk access to the raw file."
+    },
+    {
+      "name": "get_document_thumbnail",
+      "description": "Get a document thumbnail (image preview) by ID. Returns a paperless:// resource URI; read the resource to fetch the image content."
+    },
+    {
+      "name": "get_document_type",
+      "description": "Get a specific document type by ID with full details including matching rules."
+    },
+    {
+      "name": "get_mail_account",
+      "description": "Get one Paperless mail account by ID. Password/token fields are redacted if the server returns them."
+    },
+    {
+      "name": "get_mail_rule",
+      "description": "Get one Paperless mail rule by ID."
+    },
+    {
+      "name": "list_correspondents",
+      "description": "List all correspondents with optional filtering and pagination. Correspondents represent entities that send or receive documents."
+    },
+    {
+      "name": "list_custom_fields",
+      "description": "List all custom fields. IMPORTANT: When a user query may refer to a custom field, you should fetch all custom fields up front (with a large enough page_size), cache them for the session, and search locally for matches by name before making further API calls. This reduces redundant requests and handles ambiguity efficiently."
+    },
+    {
+      "name": "list_document_notes",
+      "description": "List all notes attached to a document. Notes are free-text comments on a document and are the natural place for an audit trail (e.g. \"invoice paid on X from account Y\") or progress notes on an action item."
+    },
+    {
+      "name": "list_document_types",
+      "description": "List all document types. IMPORTANT: When a user query may refer to a document type or tag, you should fetch all document types and all tags up front (with a large enough page_size), cache them for the session, and search locally for matches by name or slug before making further API calls. This reduces redundant requests and handles ambiguity between tags and document types efficiently."
+    },
+    {
+      "name": "list_documents",
+      "description": "List and filter documents with pagination and common Paperless filters such as title search, correspondent, document type, tag, storage path, creation date, archive serial number, and simple custom field filters. Use 'query_documents' for full-text query, structured custom field conditions, or advanced documented /api/documents/ query parameters. IMPORTANT: For queries like 'the last 3 contributions' or when searching by tag, correspondent, document type, or storage path, first use the relevant lookup tool to find the correct ID. Note: Document content is excluded from results by default. Use 'get_document_content' when you need the document text."
+    },
+    {
+      "name": "list_mail_accounts",
+      "description": "List Paperless mail accounts for selecting the account ID needed by mail rules. Does not expose account passwords."
+    },
+    {
+      "name": "list_mail_rules",
+      "description": "List Paperless mail rules with optional pagination."
+    },
+    {
+      "name": "list_tags",
+      "description": "List all tags. IMPORTANT: When a user query may refer to a tag or document type, you should fetch all tags and all document types up front (with a large enough page_size), cache them for the session, and search locally for matches by name or slug before making further API calls. This reduces redundant requests and handles ambiguity between tags and document types efficiently."
+    },
+    {
+      "name": "post_document",
+      "description": "Upload a new document to Paperless-NGX with optional metadata like title, correspondent, document type, tags, and custom fields. Provide either 'file' (base64-encoded content) or 'file_path' (absolute path to a file on the server's filesystem). Using file_path avoids base64 encoding overhead for large files. SECURITY: When using file_path, set PAPERLESS_MCP_UPLOAD_PATHS environment variable to restrict uploads to specific directories (colon-separated paths)."
+    },
+    {
+      "name": "process_mail_account",
+      "description": "Manually run Paperless mail processing for one account. This can consume matching mails according to enabled Paperless mail rules."
+    },
+    {
+      "name": "query_documents",
+      "description": "Query documents using the full-text query engine plus structured Paperless filters. Use this for complex filtering, custom field conditions, or any documented /api/documents/ query parameters that are not exposed as first-class arguments. Prefer the dedicated top-level arguments where available. custom_field_query supports [field_name_or_id, operator, value] leaves or ['AND'|'OR', [clause1, clause2]] groups. Note: Document content is excluded from results by default. Use 'get_document_content' when you need the document text."
+    },
+    {
+      "name": "search_documents",
+      "description": "Deprecated compatibility wrapper for full-text document search. Use 'query_documents' with the 'query' argument for new integrations. Note: Document content is excluded from results by default. Use 'get_document_content' to retrieve content when needed."
+    },
+    {
+      "name": "search_passages",
+      "description": "Search documents full-text and return bounded text passages around each hit instead of whole documents. The window is anchored on the server's own highlighted phrase (falling back to the LONGEST matching query term, then the document head), so the returned passage contains the actual hit even when stemming matched a word variant. Queries that the server rejects with an HTTP 400 are retried once with a defensively rewritten query (apostrophes and stray quotes removed); such responses carry query_sanitized: true. Returns document id, title, score, offset, content_length, and the highlighted snippet. Use this to locate and skim evidence across many documents without flooding context; page further with get_document_content offsets."
+    },
+    {
+      "name": "semantic_search",
+      "description": "Search the document corpus by MEANING as well as by words, using a local vector index fused with the corpus' own BM25 lexical search. Returns bounded passages in the same shape as search_passages (id, title, score, passage, offset, content_length) plus `matched`, which says whether the hit came from meaning, words, or both -- a 'words' hit is a lexical match the vector side did not find, so do not read it as absence of a paraphrase. HONEST DEGRADATION: `semantic` is 'unavailable' and lexical results are still returned when the local embedding server is down; a degraded call never returns a silent empty list. strong_match is true exactly when at least one passage was returned; it is a COARSE 'did-anything-come-back' flag, NOT a quality judgement -- the 0.45 similarity floor it used to consult cannot fire on this corpus (best raw similarities run 0.73-0.79), so judge quality from `matched`, `retrievers` and the passages themselves. Requires the local index to have been built with sync_embeddings."
+    },
+    {
+      "name": "sync_embeddings",
+      "description": "Bring the local semantic-search index up to date with the Paperless corpus. Fetches every document whose `modified` changed since the last run, re-chunks and re-embeds it, removes documents that no longer exist, and refreshes metadata for documents whose tags or correspondent changed without the document being edited. Long-running on a first build (tens of minutes for a large corpus) and it stops with an error if the local embedding server is unavailable, rather than leaving a half-built index that claims to be complete. Run embedding_status afterwards to confirm. force:true re-embeds every document and should only be used when the chunker or the model changed."
+    },
+    {
+      "name": "update_correspondent",
+      "description": "Update an existing correspondent's name, matching pattern, or matching algorithm."
+    },
+    {
+      "name": "update_custom_field",
+      "description": "Update an existing custom field's name, data type, or extra configuration data."
+    },
+    {
+      "name": "update_document",
+      "description": "Update a specific document with new values (title, correspondent, document type, storage path, tags, custom fields, and more). Top-level fields you omit are left unchanged. IMPORTANT: custom_fields is the exception — see its parameter description; it replaces the document's entire custom-field set."
+    },
+    {
+      "name": "update_document_type",
+      "description": "Update an existing document type's name, matching pattern, or matching algorithm."
+    },
+    {
+      "name": "update_mail_rule",
+      "description": "Patch an existing Paperless mail rule. Only supplied fields are changed."
+    },
+    {
+      "name": "update_tag",
+      "description": "Update an existing tag's name, color, matching pattern, or matching algorithm."
     }
   ],
   "user_config": {

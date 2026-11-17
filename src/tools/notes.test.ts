@@ -33,12 +33,32 @@ function createTransportPair() {
   return { clientTransport, serverTransport };
 }
 
-function parseToolText(result: CallToolResult) {
+/**
+ * Read a tool result as JSON, or as prose if it is not JSON.
+ *
+ * ⚠️ "EVERY TOOL TEXT IS JSON" WAS UNDER-DECLARED, and this helper is where that
+ * showed up. It was true only because every error happened to be a serialised
+ * blob. When error payloads became actionable sentences (the MCP spec asks for
+ * tool execution errors a model can self-correct from), a bare `json.parse`
+ * threw a SyntaxError *before* the assertions ran -- so three tests failed on
+ * the parse, not on the behaviour they exist to check, and the error text a
+ * caller now sees was never actually asserted.
+ *
+ * Errors are prose; successes are JSON. Say so, and let the caller read either.
+ * Success paths still get a parsed object, so `?.error` and property access keep
+ * working; an error path yields the sentence itself plus an `error` field, so
+ * both `parseToolText(r)?.error` and a bare `.match` on the text stay valid.
+ */
+function parseToolText(result: CallToolResult): any {
   const item = result.content?.[0];
   if (!item || item.type !== "text") {
     throw new Error("Expected text tool response");
   }
-  return JSON.parse(item.text);
+  try {
+    return JSON.parse(item.text);
+  } catch {
+    return { error: item.text };
+  }
 }
 
 interface NoteApiCalls {

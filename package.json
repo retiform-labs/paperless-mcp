@@ -1,6 +1,6 @@
 {
   "name": "@retiform/paperless-mcp",
-  "version": "2.3.6",
+  "version": "2.4.0",
   "description": "MCP server for Paperless-NGX with bounded content reads - ranged document windows and passage search so agents never flood their context.",
   "main": "build/index.js",
   "bin": {
@@ -10,11 +10,14 @@
     "test": "node --require ts-node/register --test \"src/**/*.test.ts\"",
     "test:e2e": "node --require ts-node/register --test e2e/e2e.test.ts",
     "start": "ts-node src/index.ts",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "dxt-pack": "dxt pack",
     "inspect": "npm run build && npx -y @modelcontextprotocol/inspector node build/index.js",
     "prepack": "rm -rf build && npm run build && npm run sync-manifest && npm run dxt-pack",
-    "sync-manifest": "node scripts/sync-manifest-version.mjs"
+    "sync-manifest": "node scripts/sync-manifest-version.mjs && node scripts/sync-manifest-tools.mjs",
+    "eval": "node eval/run.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "sync-manifest-tools": "node scripts/sync-manifest-tools.mjs"
   },
   "keywords": [
     "mcp",
@@ -47,13 +50,16 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "axios": "^1.20.0",
+    "better-sqlite3": "^13.2.0",
     "express": "^5.1.0",
     "form-data": "^4.0.2",
+    "sqlite-vec": "^0.1.9",
     "zod": "~4.4.3"
   },
   "devDependencies": {
     "@anthropic-ai/dxt": "^0.2.6",
     "@changesets/cli": "^2.29.4",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.2",
     "@types/node": "^24.0.0",
     "ts-node": "^10.9.2",

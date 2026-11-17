@@ -15,7 +15,8 @@ This is a fork of [baruchiro/paperless-mcp](https://github.com/baruchiro/paperle
 Upstream returns whole documents. That is fine for a human clicking through a UI
 and crippling for an agent: a single `get_document_content` call on a
 several-hundred-page PDF can consume an entire context window, and there is no
-way to ask for a slice. This fork adds bounded reads:
+way to ask for a slice. This fork adds bounded reads and local semantic
+search:
 
 - **Ranged `get_document_content`** -- `offset` + `max_chars` windows, with honest
   `content_length` / `truncated` / `has_more` metadata.
@@ -28,6 +29,11 @@ way to ask for a slice. This fork adds bounded reads:
   before making it.
 - **Query resilience** -- an apostrophe in a search query is retried sanitized
   instead of returning a hard 400.
+- **Semantic search** -- `semantic_search` searches by meaning as well as by
+  words, fusing a local vector index with the lexical search above and
+  returning the same bounded-passage shape as `search_passages`. Optional,
+  local-only, and built explicitly with `sync_embeddings`; `embedding_status`
+  reports what the index holds. See [Semantic search setup](#semantic-search-setup).
 
 We also fix the build so it is idempotent (`tsc` no longer consumes its own
 `.d.ts` output on a rebuild). Upstream was unable to take this work, and agentic
@@ -96,7 +102,27 @@ Add these to your MCP config file:
 | `PAPERLESS_PUBLIC_URL` | No | `PAPERLESS_URL` | Public-facing URL for document links |
 | `PAPERLESS_API_VERSION` | No | `9` | Paperless-ngx REST API version. `9` works on Paperless-ngx v2.x (recent) and v3.x. Paperless-ngx v3.0.0 dropped support for versions below `9`, so older defaults now return HTTP 406. If you see HTTP 406 errors, set this to a version your server supports. |
 | `PAPERLESS_MCP_UPLOAD_PATHS` | No | — | Colon-separated list of allowed directories for `file_path` uploads. **Recommended for security.** Example: `/var/uploads:/tmp/scans` |
-| `PAPERLESS_MCP_MAX_INLINE_CHARS` | No | `50000` | Hard cap on characters a single tool response may inline. Requests above the budget fail with the document size and a hint toward bounded reads instead of silently truncating or flooding context. |
+| `PAPERLESS_MCP_MAX_INLINE_CHARS` | No | `20000` | Hard cap on characters a single tool response may inline. Requests above the budget fail with the document size and a hint toward bounded reads instead of silently truncating or flooding context. The default matches the 20,000-char ceiling most MCP clients apply to a tool result; setting it higher means the response is built whole and then truncated downstream without your caller being able to tell. |
+| `PAPERLESS_MCP_EMBEDDING_URL` *(Search)* | No | `http://127.0.0.1:11434` | Base URL of an OpenAI-compatible `/embeddings` endpoint. Either reply envelope is accepted — `{embeddings: [[...]]}` (Ollama native) or `{data: [{embedding: [...]}]}` (OpenAI-compatible) — so no setting tells the client which shape to expect. Setting this (or any other `PAPERLESS_MCP_*` search variable) enables the semantic-search tools. |
+| `PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY` *(Search)* | No | `false` | When `true`, the endpoint must be a literal loopback (`127.0.0.1`, `::1`) or RFC1918 address (`10.x`, `172.16-31.x`, `192.168.x`); a DNS name is refused, because a name can resolve anywhere. Set this if indexed text must not leave your network. Off by default so a hosted provider works without a policy you did not ask for. |
+| `PAPERLESS_MCP_EMBEDDING_API_KEY` *(Search)* | No | — | Sent as `Authorization: Bearer <key>`. Never logged, never included in an error message, and held in a private field so it does not appear in a serialised client object. Leaving it unset sends no authorization header at all. |
+| `PAPERLESS_MCP_EMBEDDING_MODEL` *(Search)* | No | `nomic-embed-text` | Embedding model name, requested from the server above. Must produce 768-dimension vectors. |
+| `PAPERLESS_MCP_EMBEDDING_PREFIX_MODE` *(Search)* | No | `nomic` | One of `nomic`, `none`, `e5` — the prefix template applied to embedded text. The prefix is **baked into every stored vector at build time**, so a query built with a different mode returns quietly worse results rather than an error. A mismatch between the stored mode and the configured one is refused loudly; changing this requires a rebuild. |
+| `PAPERLESS_MCP_INDEX_DIR` *(Search)* | No | `~/.local/share/paperless-mcp/index` | Directory holding `index.db`. Outside your Paperless-ngx container by design. |
+| `PAPERLESS_MCP_MAX_CHUNKS` *(Search)* | No | `4000` | Maximum chunks stored per document. A longer document is truncated, and `embedding_status` reports how many were. Clamped to what the row-id encoding can address; a larger value is reduced rather than refused. |
+| `PAPERLESS_MCP_SYNC_BATCH_SIZE` *(Search)* | No | `16` | Texts sent per embedding request during a sync (1–256). Lower it if your embedding server falls over on larger batches. |
+| `PAPERLESS_MCP_SYNC_INTERVAL_MS` *(Search)* | No | `0` (off) | Interval between automatic incremental syncs (0–86400000). A positive value starts a background timer when the tools register; it runs one sync immediately, then once per interval. `0` means no timer, which is the default — drive `sync_embeddings` from your client instead. The timer is cleared on `close()`. |
+| `PAPERLESS_MCP_WEBHOOK_PORT` *(Search)* | No | `0` (off) | Port for the change-notification receiver. A positive value starts a listener that re-indexes documents as they change, so the index stays current without anything polling. **Off by default**: an install that never asked for a listening socket must not acquire one by upgrading. Requires `PAPERLESS_MCP_WEBHOOK_SECRET`; the receiver refuses to start without one. |
+| `PAPERLESS_MCP_WEBHOOK_SECRET` *(Search)* | Only with the port | — | Shared secret the sender must present, in the `x-paperless-mcp-secret` header or as a `Bearer` token. Compared in constant time. The receiver **refuses to start** when this is unset and the port is set, because an unauthenticated endpoint would let anyone trigger embedding work. |
+| `PAPERLESS_MCP_WEBHOOK_HOST` *(Search)* | No | `127.0.0.1` | Address to bind. Loopback unless you widen it deliberately. **A containerised Paperless-ngx cannot reach `127.0.0.1` on the host** — see the receiver section below. |
+| `PAPERLESS_MCP_WEBHOOK_DEBOUNCE_MS` *(Search)* | No | `2000` | Quiet period before a burst of deliveries becomes one sync. A bulk edit arrives as one request per document within a few seconds; coalescing them means 200 events cost one run, not 200. |
+
+Rows marked *(Search)* belong to the optional semantic-search feature: **setting any one of them
+enables the three search tools**, and each value you set is validated strictly rather than silently
+defaulted. Four of them also accept an unprefixed fallback name — `EMBEDDING_URL`, `EMBEDDING_MODEL`,
+`EMBEDDING_PREFIX_MODE`, `SYNC_INTERVAL_MS` — tried only when the prefixed form is unset. Prefer the
+prefixed names: the unprefixed ones are generic, so any other MCP server sharing the same process
+environment can collide with them.
 
 That's it! Now you can ask Claude to help you manage your Paperless-NGX documents.
 
@@ -245,10 +271,12 @@ get_document_content({ id: 123, offset: 8000, max_chars: 8000 })
 // → next window
 ```
 
-Requests above the inline budget (`PAPERLESS_MCP_MAX_INLINE_CHARS`, default 50000) fail with the document size and a hint toward offset reads or the `download_document` resource — never a silent slice, never an unbounded return. The response always carries `content_length`, `truncated`, and `has_more` so callers can page deterministically.
+Requests above the inline budget (`PAPERLESS_MCP_MAX_INLINE_CHARS`, default 20000) fail with the document size and a hint toward offset reads or the `download_document` resource — never a silent slice, never an unbounded return. The response always carries `content_length`, `truncated`, and `has_more` so callers can page deterministically.
 
 #### search_passages
-Search documents full-text and return **bounded text passages around each hit** instead of whole documents. Each window is anchored on the server's own highlighted phrase (falling back to the first verbatim term occurrence, then the document head), so the returned passage contains the actual hit even when the search index stemmed a word variant that does not appear verbatim in the stored text. Returns the document id, title, score, offset, `content_length`, and the highlighted snippet.
+Search documents full-text and return **bounded text passages around each hit** instead of whole documents. Each window is anchored on the server's own highlighted phrase (falling back to the **longest matching query term**, then the document head), so the returned passage contains the actual hit even when the search index stemmed a word variant that does not appear verbatim in the stored text. Returns the document id, title, score, offset, `content_length`, and the highlighted snippet.
+
+⚠️ **This tool and `semantic_search` rank their fallback anchor differently, on purpose.** `semantic_search` orders candidates by corpus **rarity**, because it holds the index. This tool has no index access and never will, so it uses term **length** as its proxy. When the server's highlight resolves — which is the common case here — neither fallback runs and the two agree exactly.
 
 Queries that the server rejects with an opaque HTTP 400 (django-watson rejects some syntactically valid queries, notably those containing apostrophes) are retried once with a defensively rewritten query — apostrophes and stray quotes removed; structured filter values are never rewritten. Responses from a rewritten retry carry `query_sanitized: true`. Persistent failures throw a structured error naming every attempted query.
 
@@ -783,6 +811,275 @@ delete_mail_rule({
   confirm: true
 })
 ```
+
+### Semantic Search
+
+Three optional tools that search the corpus by **meaning** as well as by words, using a vector index fused with the corpus' own lexical (BM25) search. They register only when at least one of the search variables below is set — the nine marked *Search* in the Environment Variables table, not `PAPERLESS_MCP_MAX_INLINE_CHARS` or `PAPERLESS_MCP_UPLOAD_PATHS`. With none of the nine set, the server behaves exactly as before.
+
+Any OpenAI-compatible `/embeddings` endpoint works: a local server such as Ollama, or a hosted provider with an API key. Both reply envelopes are accepted without configuration. If indexed text must not leave your network, set `PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY=true` — the endpoint is then required to be a literal loopback or RFC 1918 address and a DNS name is refused. It is off by default so an install pointing at a hosted provider is not fighting a policy it never chose.
+
+#### semantic_search
+Search by meaning and by words together, returning bounded passages in the same shape as `search_passages`.
+
+Parameters:
+- query: What to search for, in natural language
+- limit (optional): Maximum passages to return (default 10, max 50)
+- window (optional): Characters per passage (default 800, range 200–4000)
+- correspondent, document_type, tag, storage_path, created__date__gte, created__date__lte (optional): Same filters as `search_passages`, and every one of them is honoured. A document with no filing location cannot match a numeric `storage_path` — asking for a storage path means asking for a document that has one.
+
+```typescript
+semantic_search({ query: "what did the inspector say about the roof" })
+// → {
+//     query, semantic: "ok", strong_match: true, total_hits: 4,
+//     passages: [{ id, title, score, matched, highlights, passage, offset, content_length, offset_space }, ...]
+//   }
+```
+
+**Return shape.** `passages[]` mirrors `search_passages` — `id`, `title`, `score`, `passage`, `offset`, `content_length` — so a client that has learned one has learned the other. `matched` is added, saying whether the hit came from meaning, words, or both.
+
+⚠️ **`score` is a reciprocal-rank-fusion sum, not a similarity.** Do not read it against a 0–1 scale, and do not threshold it. For each list a document appears in it contributes `1 / (k + rank)` using its best rank there, so with two retrievers the maximum is `2 / (k + 1)` where `k` is the fusion constant:
+
+```
+score = Σ_arms  1 / (k + bestRank_in_that_arm)
+```
+
+**The ceiling is a function of `k` and moves when `k` moves** — it is `2/11 ≈ 0.182` at the shipped `k = 10`. A score near the top means "both retrievers ranked this document first", which is the strongest agreement this scale can express; a score of `0.05` is not "5% relevant", it is a lower position in the same sum. Rank order is the meaning; the magnitude is not portable between versions. If you need a relevance judgement, use `matched` (which halves found it) and the passages themselves.
+
+**Where the window anchors.** On the **rarest matching query term**, measured as that term's chunk count across the index and computed once per request. Length is only the tiebreak. It went through two earlier heuristics, and both were wrong in instructive ways: it first anchored on the first term in query order, and English queries open with articles — `"the practice of a wrathful deity with a lion head"` anchored on `"the"` at character 3 and the window landed at the document head. Anchoring on the *longest* term fixed that case and then failed the opposite one: `"doctor"` is longer than `"ankle"` but far commoner (measured 1,903 chunks against 808), so a query containing both anchored on the less distinctive word. Rarity matched a human read 3/3 where length managed 0/3. If no query term appears in the document at all, the window falls back to offset 0 and reports no anchoring term; that is a deliberate, honest head window rather than a fabricated match.
+
+⚠️ **`offset` is in the RECONSTRUCTED text space, not the raw file.** The passage is rebuilt by joining the document's chunks, so chunk *p* begins at `(p−1)×1800`. `offset` and `content_length` address that reconstruction. **Each passage carries `offset_space`** — `"normalized"` on this path, `"document"` when it fell back to the API's own content — so a caller can tell which space it is in without assuming. Do not feed these offsets to a raw-file byte reader.
+
+**`matched`** is `"meaning"`, `"words"`, or `"both"`. It tells you whether to trust the hit or re-query lexically: `"words"` means the hit came from the lexical side and the vector side did not find it, so **do not read a words-only result as absence of a paraphrase** that is worded differently.
+
+**`total_hits`** is the number of distinct documents the ranking returned **before** your filter
+arguments were applied, so it can exceed `passages.length`. The difference is not left unexplained:
+
+- **`filtered_out`** — how many candidates your filter arguments dropped. When non-zero, `filtered_out_reasons` says which filter did it: `metadata_filter` (a filter you passed) or `document_unavailable` (the document existed in the ranking but could no longer be fetched).
+- **`retrievers`** — which halves of the search actually ran, as `"vector"` and/or `"lexical"`. An empty `passages` with both names present is a real result: both engines ran and neither found anything. An empty `passages` with only one name is a partial answer, and `semantic` plus `degraded_reason` say why.
+
+**`trimmed`** is present **only when the response was too large to return whole**, and it says exactly what was cut rather than leaving the caller to guess:
+
+```typescript
+trimmed?: {
+  reason: "result_size";      // the only reason today
+  dropped: number;            // how many passages were removed
+  limit_chars: 20000;         // the ceiling that forced it
+  query_truncated?: boolean;  // true only when the ECHOED query was cut too
+}
+```
+
+⚠️ **The bound covers the whole serialised result, not just the passages.** A pathologically long `query` is echoed back, so it is also truncated when necessary — that is what `query_truncated` announces. **A trimmed response is a real answer, not a failure**: the passages you got are the highest-ranked ones, and `dropped` tells you how many you did not.
+
+⚠️ **Note the gap this leaves.** Filtering happens after ranking, so a filtered query can return fewer
+passages than `limit` even when more documents matched the filter. `filtered_out` is how you see that
+happened rather than assuming the corpus is thin.
+
+**`strong_match`** is `true` exactly when at least one passage was returned. It is a **coarse "did anything come back" flag, not a quality judgement.**
+
+⚠️ **It used to consult a 0.45 similarity floor, and that floor could not fire on this corpus.** Measured: best raw similarities run **0.73–0.79**, so 0.45 sits *below the worst irrelevant query* — the old field reported `true` on every call that produced a hit, regardless of quality. Rather than keep a field that cannot be `false`, it now says what it actually means.
+
+Judge result quality from **`matched`** (meaning / words / both), **`retrievers`** (which halves ran), and the passages themselves. Do not write `if (!strong_match) requery()` — that branch is unreachable.
+
+**Degradation contract.** The embedding server being down is an expected condition, not an error, so `semantic_search` never fails because of it. It returns the lexical results it can still produce, with `semantic: "unavailable"` and a `degraded_reason` naming the cause:
+
+```typescript
+// → { semantic: "unavailable", degraded_reason: "connect ECONNREFUSED 127.0.0.1:11434",
+//     strong_match: true, total_hits: 1, passages: [...] }
+```
+
+**A degraded call never returns a silent empty list.** `passages: []` alone cannot distinguish "nothing matched" from "half the search engine was missing", so the state is carried explicitly. Three outcomes, and `retrievers` is what tells them apart:
+
+| `semantic` | `retrievers` | Meaning |
+|---|---|---|
+| `"ok"` | both | Both engines ran. An empty list here **is** a real answer — nothing matched. |
+| `"unavailable"` | `["lexical"]` | The embedder was unreachable; `degraded_reason` names the cause. Results are word-matches only, so a paraphrase will be missed. |
+| absent | `[]` | Neither engine could run. The tool returns an **error** rather than an empty list that would read as "no such document". |
+
+⚠️ `semantic_search` requires the index to have been built first — see `sync_embeddings` and [Semantic search setup](#semantic-search-setup).
+
+#### embedding_status
+Report what the index actually holds. No parameters.
+
+```typescript
+embedding_status()
+// → {
+//     documents: 1240, chunks: 9678, dimensions: 768,
+//     model: "nomic-embed-text", prefix_mode: "nomic",
+//     last_sync: "2026-11-15T12:04:11.000Z",
+//     pending: 3, store_bytes: 148373504, truncated_documents: 2,
+//     index_path: "/home/you/.local/share/paperless-mcp/index/index.db"
+//   }
+```
+
+- `documents` / `chunks` — what is indexed now
+- `dimensions`, `model`, `prefix_mode` — what the index was **built** with; a mismatch against the running configuration is refused at query time
+- `last_sync` — the most recent metadata stamp written, or `null`
+- `pending` — remote document count minus indexed count. **`null` means the count could not be read**, which is not the same as `0`
+- `store_bytes` — size of `index.db` on disk, or `null` if the file does not exist yet
+- `truncated_documents` — documents that hit `PAPERLESS_MCP_MAX_CHUNKS` and lost their tail. **On a truncated document "not found" may be a false negative**, which is why this is reported
+- `open_error` — present only when the index could not be opened, and then the counts above are zeros
+
+Use this to tell "the index is empty" apart from "nothing matched".
+
+#### sync_embeddings
+Bring the index up to date with the corpus. Long-running on a first build.
+
+Parameters:
+- force (optional): Re-embed every document even if `modified` is unchanged. Only needed after a chunker or model change; a normal sync is incremental.
+
+```typescript
+sync_embeddings({})
+// → { added: 12, updated: 3, deleted: 0, metadataRefreshed: 4, failed: 0, deletedSkipped: false }
+```
+
+A normal sync fetches every document whose `modified` changed since the last run, re-chunks and re-embeds it, removes documents that no longer exist, and rebuilds metadata (tags, correspondent, document type) for documents whose metadata age exceeds 24 hours without the document itself being edited.
+
+- `failed` counts documents that errored individually and were skipped; `embedding_status` will still show them as pending
+- `deletedSkipped: true` means the remote list changed mid-run (row count disagreed with the reported count), so the delete step was skipped rather than risk removing live documents
+
+**An embedding outage aborts the run.** It stops rather than writing an index that is missing documents while claiming to be complete. Run `embedding_status` afterwards to confirm.
+
+⚠️ **`force: true` discards the existing vectors before it rebuilds them, and it proves the embedder is alive first.** The probe is a real embedding of a short constant string, not a health GET — a server that answers GET without its model pulled fails on the first real request, so a GET would clear the index and then discover the problem. If the probe fails, the call refuses and **your existing index is untouched**. Only after a successful probe are the document rows deleted, in the same transaction as their lexical rows. An interrupted rebuild still leaves you with no fallback, so confirm with `embedding_status` afterwards.
+
+## Semantic search setup
+
+Semantic search is entirely optional and off until you configure it.
+
+1. **Point it at an embedding server.** The default is `http://127.0.0.1:11434` with `nomic-embed-text`, which is Ollama's out-of-the-box shape. Set `PAPERLESS_MCP_EMBEDDING_URL` to any OpenAI-compatible `/embeddings` endpoint — a local server or a hosted provider — and `PAPERLESS_MCP_EMBEDDING_API_KEY` if that provider needs a bearer token. A base URL with no path is resolved to `/api/embed` (Ollama) and any other path is used as given; a URL already ending in `/embeddings` is used verbatim.
+2. **Set at least one `PAPERLESS_MCP_*` search variable** (see the Environment Variables table). Any one of them enables the tools; every value you set is validated strictly, and an invalid value refuses loudly rather than silently defaulting.
+3. **Build the index by calling `sync_embeddings`.** Nothing is built at startup — a first build only happens when you ask for it. Set `PAPERLESS_MCP_SYNC_INTERVAL_MS` to a positive value if you want incremental syncs on a timer afterwards; the first run is immediate, and the timer is cleared when the server closes. On a large corpus the first build takes tens of minutes; call `embedding_status` to watch `documents` and `chunks` climb.
+4. **Search.** `semantic_search` fuses the vector index with the corpus' lexical search.
+
+The index lives at `~/.local/share/paperless-mcp/index/index.db` by default, or wherever `PAPERLESS_MCP_INDEX_DIR` points. It is deliberately **outside** your Paperless-ngx container: it is derived data, it is regenerable by re-running `sync_embeddings`, and putting it inside the container would drag it into that container's backup scope.
+
+**Keeping text on your own network.** If indexed content must not leave the host, set `PAPERLESS_MCP_EMBEDDING_LOCAL_ONLY=true`. The endpoint is then required to be a literal loopback or RFC 1918 address, and a DNS name is refused — a name can resolve to anywhere. By default this restriction is off, because the package is published for general use and a third-party install must be able to point it at whichever provider it has.
+
+## Keeping the index current without polling
+
+An incremental sync compares a recorded watermark against the live corpus, so it can tell you
+"nothing changed" in a single request. That works for additions, edits and deletions — but it is
+**structurally blind to one case**: a tag, correspondent or document-type edit is applied through a
+bulk update that never touches a document's `modified` timestamp, and never changes the document
+count. Both watermark scalars therefore read "nothing happened" while the affected documents'
+metadata is genuinely stale in the index.
+
+The only signal that exists for that change is the event. So the server can optionally listen for
+Paperless-ngx's own webhooks and re-index the documents a delivery names.
+
+### Turning it on
+
+Set a port and a shared secret:
+
+```bash
+PAPERLESS_MCP_WEBHOOK_PORT=8899
+PAPERLESS_MCP_WEBHOOK_SECRET=<a-long-random-string>
+```
+
+The receiver is **off by default** (`PAPERLESS_MCP_WEBHOOK_PORT=0`) and **refuses to start if the
+secret is unset**, logging the reason instead. That refusal is deliberate: the endpoint causes
+embedding work, and an unauthenticated trigger for it is a resource-abuse vector, so a warning line
+nobody reads would not be a mitigation.
+
+It is not a replacement for `sync_embeddings` or the background interval. A webhook only reports
+events the process was alive to receive; a document added while the server was down produces no
+delivery at all. The watermark still covers downtime, and the periodic metadata refresh still runs
+as a backstop for a delivery that was attempted and never arrived (the sender retries a few times
+and then gives up).
+
+### Creating the workflow in Paperless-ngx
+
+Paperless-ngx fires webhooks through a *workflow*, which you create once. Nothing here creates it
+for you — it is your instance to configure.
+
+```bash
+curl -X POST "$PAPERLESS_URL/api/workflows/" \
+  -H "Authorization: Token $PAPERLESS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Keep the semantic index current",
+    "enabled": true,
+    "triggers": [
+      { "type": 2, "matching_algorithm": 0 },
+      { "type": 3, "matching_algorithm": 0 }
+    ],
+    "actions": [
+      {
+        "type": 4,
+        "webhook": {
+          "url": "http://172.17.0.1:8899/webhook/paperless",
+          "use_params": true,
+          "as_json": true,
+          "params": { "id": "{{ doc_id }}" },
+          "headers": { "X-Paperless-MCP-Secret": "<a-long-random-string>" }
+        }
+      }
+    ]
+  }'
+```
+
+Notes on that payload, each of which is a way to get it subtly wrong:
+
+- **`type: 2` is "Document Added" and `type: 3` is "Document Updated"** on the trigger; **`type: 4`
+  is "Webhook"** on the action. The trigger types are a separate numbering from the action types.
+- **`"matching_algorithm": 0`** means "no content filter", so the trigger matches every document. A
+  non-zero value makes the trigger filter on document text, which is not what you want here.
+- The template uses **Jinja syntax** (`{{ doc_id }}`), not a different placeholder style, and is
+  rendered before the request is sent. `use_params` with a `params` dictionary posts a form; add
+  `"as_json": true` to post JSON instead. Both are parsed.
+- **The document id must be in the body.** A delivery that names no document still triggers a sync,
+  but an untargeted one — correct, merely more expensive. The receiver cannot infer which document
+  changed, because the payload carries no change description.
+- **The secret goes in `headers`.** The receiver also accepts it as a `Bearer` token if you would
+  rather not add a custom header.
+
+### The container networking reality
+
+**A Paperless-ngx running in a container cannot reach `127.0.0.1` on your host.** That address is
+the *container's* own loopback. If you leave `PAPERLESS_MCP_WEBHOOK_HOST` at its default and point
+the workflow at `127.0.0.1`, deliveries will fail with a connection error.
+
+Two things have to be true instead:
+
+1. **The receiver binds an address the container can route to.** In a default Docker bridge setup
+   the host is reachable from containers at the bridge gateway, commonly `172.17.0.1`. Set
+   `PAPERLESS_MCP_WEBHOOK_HOST` to that (or `0.0.0.0` to listen on all interfaces) and use the same
+   address in the workflow URL. If your containers run on a user-defined network, the gateway is a
+   different address in that subnet; `docker network inspect <network>` shows it.
+2. **Your host firewall permits the traffic.** Most default-DROP firewall configurations will
+   silently swallow a connection from the bridge subnet, which looks exactly like the receiver not
+   running. Permit the port from the bridge subnet specifically, not from everywhere.
+
+Binding `0.0.0.0` widens the endpoint to every interface the host has. That is sometimes the only
+workable choice, and it is why the default is loopback: it should be a decision, not an inheritance.
+
+### How a delivery is handled
+
+- The endpoint answers **`202 Accepted` before doing any work.** The sender times out after a few
+  seconds and retries on failure, so acknowledging first is what turns those retries into harmless
+  duplicates instead of repeated embedding runs.
+- Deliveries are **coalesced**: ids are collected and one sync runs after a quiet period. A bulk
+  edit that produces hundreds of deliveries produces one run naming every affected document.
+- A delivery for a document that no longer exists is **counted as a failure and skipped**; the rest
+  of the batch proceeds. A delivery can be in flight when its document is deleted, and that is not a
+  reason to abandon the others.
+- **Deletions produce no delivery.** Paperless-ngx's trigger set has no delete type, so the
+  document count in the watermark remains the only thing that notices one. This is stated plainly
+  rather than worked around: there is no event to listen for.
+
+### Verifying it
+
+Send one delivery yourself — the receiver accepts anything that presents the secret:
+
+```bash
+curl -i -X POST "http://127.0.0.1:8899/webhook/paperless" \
+  -H "X-Paperless-MCP-Secret: <a-long-random-string>" \
+  -H "Content-Type: application/json" \
+  -d '{"id": 1}'
+```
+
+A `202` means it was accepted; the sync then runs after the debounce period, and its log line
+reports what it found. A `401` means the secret did not match, and a `413` means the body was over
+the 1 MB cap.
 
 ## Error Handling
 

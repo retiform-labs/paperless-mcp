@@ -1,0 +1,3332 @@
+=== fusion bake-off -- paperless-mcp ===
+index    ~/.local/share/paperless-mcp/index/index.db
+embedder http://127.0.0.1:11434 model=nomic-embed-text
+cases    20   depths 10, 50, 200   arm depth fixed at 40
+
+preconditions OK: 20/20 cases, 71 anchor terms verified present
+
+[ 1/20] doc  303  vec   1   1   1  lex   1   1   1  rrf60@10   1  rrf0@10   1
+[ 2/20] doc  925  vec   3   3   3  lex   -  21  21  rrf60@10   4  rrf0@10   6
+[ 3/20] doc 2196  vec   1   1   1  lex   1   1   1  rrf60@10   1  rrf0@10   1
+[ 4/20] doc 2557  vec   9   9   9  lex   4   4   4  rrf60@10   1  rrf0@10   5
+[ 5/20] doc  353  vec   -  21  21  lex   5   5   5  rrf60@10   8  rrf0@10  10
+[ 6/20] doc 1026  vec   2   2   2  lex   4   4   4  rrf60@10   1  rrf0@10   3
+[ 7/20] doc  215  vec   1   1   1  lex   -   -  73  rrf60@10  14  rrf0@10   2
+[ 8/20] doc 2719  vec   1   1   1  lex   1   1   1  rrf60@10   1  rrf0@10   1
+[ 9/20] doc 2694  vec   -   - 197  lex   -  43  43  rrf60@10   -  rrf0@10   -
+[10/20] doc 2698  vec   6   6   6  lex   1   1   1  rrf60@10   1  rrf0@10   1
+[11/20] doc 2699  vec   -   -  51  lex   1   1   1  rrf60@10  10  rrf0@10   2
+[12/20] doc 2692  vec   3   3   3  lex   1   1   1  rrf60@10   1  rrf0@10   1
+[13/20] doc 2676  vec   -  13  13  lex   2   2   2  rrf60@10   2  rrf0@10   3
+[14/20] doc 2681  vec   4   4   4  lex   -  33  33  rrf60@10  11  rrf0@10   7
+[15/20] doc 2687  vec   -   -  84  lex   9   9   9  rrf60@10  24  rrf0@10  19
+[16/20] doc 2727  vec   8   8   8  lex   3   3   3  rrf60@10   4  rrf0@10   4
+[17/20] doc 2633  vec   1   1   1  lex   1   1   1  rrf60@10   1  rrf0@10   1
+[18/20] doc 2714  vec   1   1   1  lex   1   1   1  rrf60@10   1  rrf0@10   1
+[19/20] doc 2675  vec   -   -   -  lex   3   3   3  rrf60@10  14  rrf0@10   6
+[20/20] doc 2573  vec   8   8   8  lex   1   1   1  rrf60@10   2  rrf0@10   1   <- CONTROL
+
+VALIDATION top-k MEMBERSHIP, deep(40)-list truncated vs call-at-k: 114/120 agree  (6 DISAGREE)
+   doc 215 lexical@200: at-k=73 deep-trunc=null
+   doc 2694 lexical@50: at-k=43 deep-trunc=null
+   doc 2694 vector@200: at-k=197 deep-trunc=null
+   doc 2694 lexical@200: at-k=43 deep-trunc=null
+   doc 2699 vector@200: at-k=51 deep-trunc=null
+   doc 2687 vector@200: at-k=84 deep-trunc=null
+
+=== RECALL: hits@k over n=20 (rank counted against k) ===
+strategy                             @10       @50      @200   helped/hurt@10 vs best single arm
+------------------------------------------------------------------------------------------------
+single: vector-only                14/20     16/20     16/20   +0 / -5
+single: lexical-only               16/20     18/20     18/20   +0 / -3
+single: max-of-two (floor)         18/20     19/20     19/20   +0 / -1
+rrf k=60 (SHIPPED FORM)            15/20     19/20     19/20   +0 / -4
+rrf k=20                           17/20     19/20     19/20   +0 / -2
+rrf k=10                           18/20     19/20     19/20   +0 / -1
+rrf k=5                            18/20     19/20     19/20   +0 / -1
+rrf k=2                            18/20     19/20     19/20   +0 / -1
+rrf k=1                            18/20     19/20     19/20   +0 / -1
+rrf k=0                            18/20     19/20     19/20   +0 / -1
+wrrf k=60 wV=0.5                   14/20     19/20     19/20   +0 / -5
+wrrf k=60 wL=0.5                   15/20     19/20     19/20   +0 / -4
+wrrf k=60 wV=2                     15/20     19/20     19/20   +0 / -4
+wrrf k=60 wL=2                     14/20     19/20     19/20   +0 / -5
+minmax sum                         18/20     19/20     19/20   +0 / -1
+minmax sum wV=2                    16/20     19/20     19/20   +0 / -3
+minmax sum wL=2                    16/20     19/20     19/20   +0 / -3
+zscore sum missing=min             18/20     19/20     19/20   +0 / -1
+zscore sum missing=0               17/20     19/20     19/20   +0 / -2
+zscore sum miss=min wL=2           17/20     19/20     19/20   +0 / -2
+interleave v-first                 18/20     19/20     19/20   +0 / -1
+interleave l-first                 18/20     19/20     19/20   +0 / -1
+rrf k=60 head=10 only              18/20     19/20     19/20   +0 / -1
+rrf k=0  head=10 only              18/20     19/20     19/20   +0 / -1
+
+=== EXCLUDING THE CONTROL CASE (n=19) ===
+single: vector-only                13/19     15/19     15/19
+single: lexical-only               15/19     17/19     17/19
+single: max-of-two (floor)         17/19     18/19     18/19
+rrf k=60 (SHIPPED FORM)            14/19     18/19     18/19
+rrf k=20                           16/19     18/19     18/19
+rrf k=10                           17/19     18/19     18/19
+rrf k=5                            17/19     18/19     18/19
+rrf k=2                            17/19     18/19     18/19
+rrf k=1                            17/19     18/19     18/19
+rrf k=0                            17/19     18/19     18/19
+wrrf k=60 wV=0.5                   13/19     18/19     18/19
+wrrf k=60 wL=0.5                   14/19     18/19     18/19
+wrrf k=60 wV=2                     14/19     18/19     18/19
+wrrf k=60 wL=2                     13/19     18/19     18/19
+minmax sum                         17/19     18/19     18/19
+minmax sum wV=2                    15/19     18/19     18/19
+minmax sum wL=2                    15/19     18/19     18/19
+zscore sum missing=min             17/19     18/19     18/19
+zscore sum missing=0               16/19     18/19     18/19
+zscore sum miss=min wL=2           16/19     18/19     18/19
+interleave v-first                 17/19     18/19     18/19
+interleave l-first                 17/19     18/19     18/19
+rrf k=60 head=10 only              17/19     18/19     18/19
+rrf k=0  head=10 only              17/19     18/19     18/19
+
+CONTROL doc 2573: vector-only=8 lexical-only=1 max-of-two (floor)=2  rrf60=2
+
+=== PER-CASE @10: single-arm rank vs each strategy rank ===
+doc      vec   lex   max  rrf60  rrf0    mm  zmin   ilv
+303        1     1     1      1     1     1     1     1
+925        3     -     6      4     6     4     4     5
+2196       1     1     1      1     1     1     1     1
+2557       9     4     8      1     5     1     1     8
+353        -     5     9      8    10     9     8     9
+1026       2     4     3      1     3     1     1     3
+215        1     -     1     14     2     3     2     1
+2719       1     1     1      1     1     1     1     1
+2694       -     -     -      -     -     -     -     -
+2698       6     1     1      1     1     1     1     2
+2699       -     1     2     10     2     3     3     2
+2692       3     1     2      1     1     1     1     2
+2676       -     2     4      2     3     2     2     4
+2681       4     -     6     11     7     9     9     6
+2687       -     9    16     24    19    19    20    16
+2727       8     3     4      4     4     4     4     4
+2633       1     1     1      1     1     1     1     1
+2714       1     1     1      1     1     1     1     1
+2675       -     3     5     14     6    10     9     6
+2573       8     1     2      2     1     1     1     2  <- CONTROL
+
+=== JSON ===
+{
+ "index": "~/.local/share/paperless-mcp/index/index.db",
+ "cases": 20,
+ "depths": [
+  10,
+  50,
+  200
+ ],
+ "armDepth": 40,
+ "validation": {
+  "membershipChecks": 120,
+  "membershipMismatch": 6,
+  "detail": [
+   "doc 215 lexical@200: at-k=73 deep-trunc=null",
+   "doc 2694 lexical@50: at-k=43 deep-trunc=null",
+   "doc 2694 vector@200: at-k=197 deep-trunc=null",
+   "doc 2694 lexical@200: at-k=43 deep-trunc=null",
+   "doc 2699 vector@200: at-k=51 deep-trunc=null",
+   "doc 2687 vector@200: at-k=84 deep-trunc=null"
+  ]
+ },
+ "table": {
+  "single: vector-only": {
+   "recall": {
+    "10": 14,
+    "50": 16,
+    "200": 16
+   },
+   "helped": 0,
+   "hurt": 5,
+   "sameHit": 14,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    353,
+    2699,
+    2676,
+    2687,
+    2675
+   ]
+  },
+  "single: lexical-only": {
+   "recall": {
+    "10": 16,
+    "50": 18,
+    "200": 18
+   },
+   "helped": 0,
+   "hurt": 3,
+   "sameHit": 16,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    925,
+    215,
+    2681
+   ]
+  },
+  "single: max-of-two (floor)": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "rrf k=60 (SHIPPED FORM)": {
+   "recall": {
+    "10": 15,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 4,
+   "sameHit": 15,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    215,
+    2681,
+    2687,
+    2675
+   ]
+  },
+  "rrf k=20": {
+   "recall": {
+    "10": 17,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 2,
+   "sameHit": 17,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687,
+    2675
+   ]
+  },
+  "rrf k=10": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "rrf k=5": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "rrf k=2": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "rrf k=1": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "rrf k=0": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "wrrf k=60 wV=0.5": {
+   "recall": {
+    "10": 14,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 5,
+   "sameHit": 14,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    925,
+    215,
+    2681,
+    2687,
+    2675
+   ]
+  },
+  "wrrf k=60 wL=0.5": {
+   "recall": {
+    "10": 15,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 4,
+   "sameHit": 15,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    215,
+    2699,
+    2687,
+    2675
+   ]
+  },
+  "wrrf k=60 wV=2": {
+   "recall": {
+    "10": 15,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 4,
+   "sameHit": 15,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    215,
+    2699,
+    2687,
+    2675
+   ]
+  },
+  "wrrf k=60 wL=2": {
+   "recall": {
+    "10": 14,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 5,
+   "sameHit": 14,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    925,
+    215,
+    2681,
+    2687,
+    2675
+   ]
+  },
+  "minmax sum": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "minmax sum wV=2": {
+   "recall": {
+    "10": 16,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 3,
+   "sameHit": 16,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    353,
+    2687,
+    2675
+   ]
+  },
+  "minmax sum wL=2": {
+   "recall": {
+    "10": 16,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 3,
+   "sameHit": 16,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    215,
+    2681,
+    2687
+   ]
+  },
+  "zscore sum missing=min": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "zscore sum missing=0": {
+   "recall": {
+    "10": 17,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 2,
+   "sameHit": 17,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2681,
+    2687
+   ]
+  },
+  "zscore sum miss=min wL=2": {
+   "recall": {
+    "10": 17,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 2,
+   "sameHit": 17,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2681,
+    2687
+   ]
+  },
+  "interleave v-first": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "interleave l-first": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "rrf k=60 head=10 only": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  },
+  "rrf k=0  head=10 only": {
+   "recall": {
+    "10": 18,
+    "50": 19,
+    "200": 19
+   },
+   "helped": 0,
+   "hurt": 1,
+   "sameHit": 18,
+   "sameMiss": 1,
+   "helpedIds": [],
+   "hurtIds": [
+    2687
+   ]
+  }
+ },
+ "perCase": [
+  {
+   "id": 303,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 1,
+     "lexical": 1
+    },
+    "50": {
+     "vector": 1,
+     "lexical": 1
+    },
+    "200": {
+     "vector": 1,
+     "lexical": 1
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: lexical-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: max-of-two (floor)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=20": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=10": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=1": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=min": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave v-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave l-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0  head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    }
+   }
+  },
+  {
+   "id": 925,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 3,
+     "lexical": null
+    },
+    "50": {
+     "vector": 3,
+     "lexical": 21
+    },
+    "200": {
+     "vector": 3,
+     "lexical": 21
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "single: lexical-only": {
+     "10": 21,
+     "50": 21,
+     "200": 21
+    },
+    "single: max-of-two (floor)": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "rrf k=20": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=10": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=5": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=2": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "rrf k=1": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "rrf k=0": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 12,
+     "50": 12,
+     "200": 12
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "wrrf k=60 wV=2": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "wrrf k=60 wL=2": {
+     "10": 12,
+     "50": 12,
+     "200": 12
+    },
+    "minmax sum": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "minmax sum wV=2": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "minmax sum wL=2": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "zscore sum missing=min": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "zscore sum missing=0": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "interleave v-first": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "interleave l-first": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "rrf k=60 head=10 only": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "rrf k=0  head=10 only": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    }
+   }
+  },
+  {
+   "id": 2196,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 1,
+     "lexical": 1
+    },
+    "50": {
+     "vector": 1,
+     "lexical": 1
+    },
+    "200": {
+     "vector": 1,
+     "lexical": 1
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: lexical-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: max-of-two (floor)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=20": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=10": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=1": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=min": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave v-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave l-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0  head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    }
+   }
+  },
+  {
+   "id": 2557,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 9,
+     "lexical": 4
+    },
+    "50": {
+     "vector": 9,
+     "lexical": 4
+    },
+    "200": {
+     "vector": 9,
+     "lexical": 4
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "single: lexical-only": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "single: max-of-two (floor)": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=20": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=10": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=2": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "rrf k=1": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=0": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wV=2": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "minmax sum wL=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "zscore sum missing=min": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=0": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "interleave v-first": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "interleave l-first": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "rrf k=60 head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0  head=10 only": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    }
+   }
+  },
+  {
+   "id": 353,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": null,
+     "lexical": 5
+    },
+    "50": {
+     "vector": 21,
+     "lexical": 5
+    },
+    "200": {
+     "vector": 21,
+     "lexical": 5
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 21,
+     "50": 21,
+     "200": 21
+    },
+    "single: lexical-only": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "single: max-of-two (floor)": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "rrf k=20": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "rrf k=10": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "rrf k=5": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "rrf k=2": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "rrf k=1": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "rrf k=0": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "wrrf k=60 wV=2": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "wrrf k=60 wL=2": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "minmax sum": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "minmax sum wV=2": {
+     "10": 11,
+     "50": 11,
+     "200": 11
+    },
+    "minmax sum wL=2": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "zscore sum missing=min": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "zscore sum missing=0": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "interleave v-first": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "interleave l-first": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "rrf k=60 head=10 only": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "rrf k=0  head=10 only": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    }
+   }
+  },
+  {
+   "id": 1026,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 2,
+     "lexical": 4
+    },
+    "50": {
+     "vector": 2,
+     "lexical": 4
+    },
+    "200": {
+     "vector": 2,
+     "lexical": 4
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "single: lexical-only": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "single: max-of-two (floor)": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=20": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=10": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=1": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wL=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "zscore sum missing=min": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "interleave v-first": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "interleave l-first": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "rrf k=60 head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0  head=10 only": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    }
+   }
+  },
+  {
+   "id": 215,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 1,
+     "lexical": null
+    },
+    "50": {
+     "vector": 1,
+     "lexical": null
+    },
+    "200": {
+     "vector": 1,
+     "lexical": 73
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: lexical-only": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "single: max-of-two (floor)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 14,
+     "50": 14,
+     "200": 14
+    },
+    "rrf k=20": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "rrf k=10": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "rrf k=5": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "rrf k=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=1": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=0": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 41,
+     "50": 41,
+     "200": 41
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 13,
+     "50": 13,
+     "200": 13
+    },
+    "wrrf k=60 wV=2": {
+     "10": 13,
+     "50": 13,
+     "200": 13
+    },
+    "wrrf k=60 wL=2": {
+     "10": 41,
+     "50": 41,
+     "200": 41
+    },
+    "minmax sum": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "minmax sum wV=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "minmax sum wL=2": {
+     "10": 13,
+     "50": 13,
+     "200": 13
+    },
+    "zscore sum missing=min": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "zscore sum missing=0": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "interleave v-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave l-first": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=60 head=10 only": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "rrf k=0  head=10 only": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    }
+   }
+  },
+  {
+   "id": 2719,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 1,
+     "lexical": 1
+    },
+    "50": {
+     "vector": 1,
+     "lexical": 1
+    },
+    "200": {
+     "vector": 1,
+     "lexical": 1
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: lexical-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: max-of-two (floor)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=20": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=10": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=1": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=min": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave v-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave l-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0  head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    }
+   }
+  },
+  {
+   "id": 2694,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": null,
+     "lexical": null
+    },
+    "50": {
+     "vector": null,
+     "lexical": 43
+    },
+    "200": {
+     "vector": 197,
+     "lexical": 43
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "single: lexical-only": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "single: max-of-two (floor)": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "rrf k=20": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "rrf k=10": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "rrf k=5": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "rrf k=2": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "rrf k=1": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "rrf k=0": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "wrrf k=60 wV=2": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "wrrf k=60 wL=2": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "minmax sum": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "minmax sum wV=2": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "minmax sum wL=2": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "zscore sum missing=min": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "zscore sum missing=0": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "zscore sum miss=min wL=2": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "interleave v-first": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "interleave l-first": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "rrf k=60 head=10 only": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "rrf k=0  head=10 only": {
+     "10": null,
+     "50": null,
+     "200": null
+    }
+   }
+  },
+  {
+   "id": 2698,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 6,
+     "lexical": 1
+    },
+    "50": {
+     "vector": 6,
+     "lexical": 1
+    },
+    "200": {
+     "vector": 6,
+     "lexical": 1
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "single: lexical-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: max-of-two (floor)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=20": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=10": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=1": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wV=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "minmax sum wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=min": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave v-first": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "interleave l-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0  head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    }
+   }
+  },
+  {
+   "id": 2699,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": null,
+     "lexical": 1
+    },
+    "50": {
+     "vector": null,
+     "lexical": 1
+    },
+    "200": {
+     "vector": 51,
+     "lexical": 1
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "single: lexical-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: max-of-two (floor)": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "rrf k=20": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "rrf k=10": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "rrf k=5": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "rrf k=2": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "rrf k=1": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "rrf k=0": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 41,
+     "50": 41,
+     "200": 41
+    },
+    "wrrf k=60 wV=2": {
+     "10": 41,
+     "50": 41,
+     "200": 41
+    },
+    "wrrf k=60 wL=2": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "minmax sum": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "minmax sum wV=2": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "minmax sum wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=min": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "zscore sum missing=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave v-first": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "interleave l-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 head=10 only": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "rrf k=0  head=10 only": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    }
+   }
+  },
+  {
+   "id": 2692,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 3,
+     "lexical": 1
+    },
+    "50": {
+     "vector": 3,
+     "lexical": 1
+    },
+    "200": {
+     "vector": 3,
+     "lexical": 1
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "single: lexical-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: max-of-two (floor)": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=20": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=10": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=1": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wV=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "minmax sum wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=min": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave v-first": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "interleave l-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0  head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    }
+   }
+  },
+  {
+   "id": 2676,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": null,
+     "lexical": 2
+    },
+    "50": {
+     "vector": 13,
+     "lexical": 2
+    },
+    "200": {
+     "vector": 13,
+     "lexical": 2
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 13,
+     "50": 13,
+     "200": 13
+    },
+    "single: lexical-only": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "single: max-of-two (floor)": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=20": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=10": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=5": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=2": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "rrf k=1": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "rrf k=0": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "wrrf k=60 wV=2": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "wrrf k=60 wL=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "minmax sum": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "minmax sum wV=2": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "minmax sum wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=min": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "zscore sum missing=0": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave v-first": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "interleave l-first": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "rrf k=60 head=10 only": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=0  head=10 only": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    }
+   }
+  },
+  {
+   "id": 2681,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 4,
+     "lexical": null
+    },
+    "50": {
+     "vector": 4,
+     "lexical": 33
+    },
+    "200": {
+     "vector": 4,
+     "lexical": 33
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "single: lexical-only": {
+     "10": 33,
+     "50": 33,
+     "200": 33
+    },
+    "single: max-of-two (floor)": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 11,
+     "50": 11,
+     "200": 11
+    },
+    "rrf k=20": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "rrf k=10": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "rrf k=5": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "rrf k=2": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "rrf k=1": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "rrf k=0": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 12,
+     "50": 12,
+     "200": 12
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "wrrf k=60 wV=2": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "wrrf k=60 wL=2": {
+     "10": 12,
+     "50": 12,
+     "200": 12
+    },
+    "minmax sum": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "minmax sum wV=2": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "minmax sum wL=2": {
+     "10": 15,
+     "50": 15,
+     "200": 15
+    },
+    "zscore sum missing=min": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "zscore sum missing=0": {
+     "10": 12,
+     "50": 12,
+     "200": 12
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 14,
+     "50": 14,
+     "200": 14
+    },
+    "interleave v-first": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "interleave l-first": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    },
+    "rrf k=60 head=10 only": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "rrf k=0  head=10 only": {
+     "10": 7,
+     "50": 7,
+     "200": 7
+    }
+   }
+  },
+  {
+   "id": 2687,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": null,
+     "lexical": 9
+    },
+    "50": {
+     "vector": null,
+     "lexical": 9
+    },
+    "200": {
+     "vector": 84,
+     "lexical": 9
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "single: lexical-only": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "single: max-of-two (floor)": {
+     "10": 16,
+     "50": 16,
+     "200": 16
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 24,
+     "50": 24,
+     "200": 24
+    },
+    "rrf k=20": {
+     "10": 24,
+     "50": 24,
+     "200": 24
+    },
+    "rrf k=10": {
+     "10": 21,
+     "50": 21,
+     "200": 21
+    },
+    "rrf k=5": {
+     "10": 20,
+     "50": 20,
+     "200": 20
+    },
+    "rrf k=2": {
+     "10": 20,
+     "50": 20,
+     "200": 20
+    },
+    "rrf k=1": {
+     "10": 19,
+     "50": 19,
+     "200": 19
+    },
+    "rrf k=0": {
+     "10": 19,
+     "50": 19,
+     "200": 19
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 20,
+     "50": 20,
+     "200": 20
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 44,
+     "50": 44,
+     "200": 44
+    },
+    "wrrf k=60 wV=2": {
+     "10": 44,
+     "50": 44,
+     "200": 44
+    },
+    "wrrf k=60 wL=2": {
+     "10": 20,
+     "50": 20,
+     "200": 20
+    },
+    "minmax sum": {
+     "10": 19,
+     "50": 19,
+     "200": 19
+    },
+    "minmax sum wV=2": {
+     "10": 29,
+     "50": 29,
+     "200": 29
+    },
+    "minmax sum wL=2": {
+     "10": 12,
+     "50": 12,
+     "200": 12
+    },
+    "zscore sum missing=min": {
+     "10": 20,
+     "50": 20,
+     "200": 20
+    },
+    "zscore sum missing=0": {
+     "10": 13,
+     "50": 13,
+     "200": 13
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 12,
+     "50": 12,
+     "200": 12
+    },
+    "interleave v-first": {
+     "10": 16,
+     "50": 16,
+     "200": 16
+    },
+    "interleave l-first": {
+     "10": 15,
+     "50": 15,
+     "200": 15
+    },
+    "rrf k=60 head=10 only": {
+     "10": 16,
+     "50": 16,
+     "200": 16
+    },
+    "rrf k=0  head=10 only": {
+     "10": 16,
+     "50": 16,
+     "200": 16
+    }
+   }
+  },
+  {
+   "id": 2727,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 8,
+     "lexical": 3
+    },
+    "50": {
+     "vector": 8,
+     "lexical": 3
+    },
+    "200": {
+     "vector": 8,
+     "lexical": 3
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "single: lexical-only": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "single: max-of-two (floor)": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "rrf k=20": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=10": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=5": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=2": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=1": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=0": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "wrrf k=60 wV=2": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "wrrf k=60 wL=2": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "minmax sum": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "minmax sum wV=2": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "minmax sum wL=2": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "zscore sum missing=min": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "zscore sum missing=0": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "interleave v-first": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "interleave l-first": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "rrf k=60 head=10 only": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "rrf k=0  head=10 only": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    }
+   }
+  },
+  {
+   "id": 2633,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 1,
+     "lexical": 1
+    },
+    "50": {
+     "vector": 1,
+     "lexical": 1
+    },
+    "200": {
+     "vector": 1,
+     "lexical": 1
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: lexical-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: max-of-two (floor)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=20": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=10": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=1": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=min": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave v-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave l-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0  head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    }
+   }
+  },
+  {
+   "id": 2714,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": 1,
+     "lexical": 1
+    },
+    "50": {
+     "vector": 1,
+     "lexical": 1
+    },
+    "200": {
+     "vector": 1,
+     "lexical": 1
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: lexical-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: max-of-two (floor)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=20": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=10": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=1": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wV=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=min": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave v-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave l-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0  head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    }
+   }
+  },
+  {
+   "id": 2675,
+   "control": false,
+   "armAtDepth": {
+    "10": {
+     "vector": null,
+     "lexical": 3
+    },
+    "50": {
+     "vector": null,
+     "lexical": 3
+    },
+    "200": {
+     "vector": null,
+     "lexical": 3
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": null,
+     "50": null,
+     "200": null
+    },
+    "single: lexical-only": {
+     "10": 3,
+     "50": 3,
+     "200": 3
+    },
+    "single: max-of-two (floor)": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 14,
+     "50": 14,
+     "200": 14
+    },
+    "rrf k=20": {
+     "10": 11,
+     "50": 11,
+     "200": 11
+    },
+    "rrf k=10": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "rrf k=5": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "rrf k=2": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "rrf k=1": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "rrf k=0": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 12,
+     "50": 12,
+     "200": 12
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 43,
+     "50": 43,
+     "200": 43
+    },
+    "wrrf k=60 wV=2": {
+     "10": 43,
+     "50": 43,
+     "200": 43
+    },
+    "wrrf k=60 wL=2": {
+     "10": 12,
+     "50": 12,
+     "200": 12
+    },
+    "minmax sum": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "minmax sum wV=2": {
+     "10": 20,
+     "50": 20,
+     "200": 20
+    },
+    "minmax sum wL=2": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "zscore sum missing=min": {
+     "10": 9,
+     "50": 9,
+     "200": 9
+    },
+    "zscore sum missing=0": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 4,
+     "50": 4,
+     "200": 4
+    },
+    "interleave v-first": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    },
+    "interleave l-first": {
+     "10": 5,
+     "50": 5,
+     "200": 5
+    },
+    "rrf k=60 head=10 only": {
+     "10": 10,
+     "50": 10,
+     "200": 10
+    },
+    "rrf k=0  head=10 only": {
+     "10": 6,
+     "50": 6,
+     "200": 6
+    }
+   }
+  },
+  {
+   "id": 2573,
+   "control": true,
+   "armAtDepth": {
+    "10": {
+     "vector": 8,
+     "lexical": 1
+    },
+    "50": {
+     "vector": 8,
+     "lexical": 1
+    },
+    "200": {
+     "vector": 8,
+     "lexical": 1
+    }
+   },
+   "strategies": {
+    "single: vector-only": {
+     "10": 8,
+     "50": 8,
+     "200": 8
+    },
+    "single: lexical-only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "single: max-of-two (floor)": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=60 (SHIPPED FORM)": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=20": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=10": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=5": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=1": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "wrrf k=60 wV=0.5": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "wrrf k=60 wL=0.5": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "wrrf k=60 wV=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "wrrf k=60 wL=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "minmax sum": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "minmax sum wV=2": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "minmax sum wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=min": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum missing=0": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "zscore sum miss=min wL=2": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "interleave v-first": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "interleave l-first": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    },
+    "rrf k=60 head=10 only": {
+     "10": 2,
+     "50": 2,
+     "200": 2
+    },
+    "rrf k=0  head=10 only": {
+     "10": 1,
+     "50": 1,
+     "200": 1
+    }
+   }
+  }
+ ]
+}

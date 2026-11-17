@@ -13,11 +13,163 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version-file: ".node-version"
+          cache: "npm"
+
       - name: Install dependencies
         run: npm ci
+
+      # ---------------------------------------------------------------------
+      # BUILD -- and this is not redundant with "Run tests" below.
+      #
+      # The suite runs under ts-node, so it never exercises the compiled
+      # output. That gap shipped a real defect: a test file imported a helper
+      # from above src/, tsc inferred rootDir from the common ancestor of all
+      # emitted files, and output silently nested at build/src/... Meanwhile
+      # main and bin both point at build/index.js, which was then a stale
+      # artifact from a previous week -- and prepack runs `rm -rf build` first,
+      # so a publish would have produced a package with no entrypoint at all.
+      # 473 tests passed and tsc exited 0 the whole time.
+      # ---------------------------------------------------------------------
+      - name: Build
+        run: npm run build
+
+      # A type error must be reported AS a type error, not as a mysterious
+      # ts-node failure inside the test runner. --noEmit keeps this a pure
+      # check: the build above already produced the artifacts.
+      - name: Typecheck
+        # --no-install is deliberate: it makes the step fail if typescript is not
+        # already in node_modules, instead of silently downloading a different
+        # compiler version than the one the lockfile pins.
+        run: npx --no-install tsc --noEmit
+
+      # ---------------------------------------------------------------------
+      # The layout assertion: the specific regression gate for the defect
+      # described on the Build step. Each failure names what went wrong and
+      # why, so a future reader learns the mechanism from the message.
+      # ---------------------------------------------------------------------
+      - name: Assert build layout
+        run: |
+          set -uo pipefail
+
+          fail() {
+            echo "::error title=Build layout check failed::$1"
+            echo ""
+            echo "FAILED: $1"
+            echo ""
+            echo "$2"
+            exit 1
+          }
+
+          # 1. the entrypoint exists
+          if [ ! -f build/index.js ]; then
+            fail "build/index.js does not exist" \
+          "package.json declares main = build/index.js and bin.paperless-mcp = build/index.js,
+          so a build without that file produces an unstartable package. Check that the
+          build step actually ran, and that the include list in tsconfig.json still
+          covers src/."
+          fi
+
+          # 2. output is NOT nested under build/src/
+          if [ -d build/src ]; then
+            fail "build/src/ exists -- tsc rootDir was widened by an import from above src/" \
+          "A directory at build/src/ means TypeScript resolved its rootDir to the repository
+          root instead of src/, so every emitted path gained one extra level. The shipped
+          entrypoint build/index.js is then stale or absent while the real output sits at
+          build/src/index.js.
+
+          CAUSE: something in the compilation graph imports a file outside src/ -- most
+          often a test file importing a helper from ../scripts/, because tsconfig.json
+          sets include to src only but TypeScript follows imports regardless of include.
+
+          FIX: move the imported module under src/ and re-export it, rather than importing
+          upwards out of it. Do not 'fix' this by pointing main at build/src/index.js."
+          fi
+
+          # 3. build/index.js is newer than every file under src/
+          if [ -d src ]; then
+            newer=$(find src -type f -newer build/index.js -print -quit)
+            if [ -n "$newer" ]; then
+              fail "build/index.js is older than src/ ($newer) -- the build is stale" \
+          "A source file is newer than the entrypoint, so build/ does not correspond to the
+          tree under test. This is the failure mode the CI job exists to catch: a stale
+          build passes every ts-node test and only misbehaves for whoever installs the
+          package.
+
+          FIX: make sure the build step runs AFTER checkout, and that build output is not
+          being restored from a cache that predates the source."
+            fi
+          fi
+
+          echo "OK: build/index.js exists, build/src/ is absent, and the build is newer than src/"
+
       - name: Run tests
         run: npm test
+
+      # ---------------------------------------------------------------------
+      # The publish gate. `prepack` was in NO CI step, so everything it does ran
+      # for the first time on a real publish: `rm -rf build`, a rebuild,
+      # `sync-manifest`, and `dxt-pack`.
+      #
+      # The completion-gate found that `sync-manifest` REWRITES THE TRACKED
+      # manifest.json (2.3.5 -> 2.3.6 in a dry run), so a publish always leaves
+      # the tree dirty for the next person. That is unambiguous and is a hard
+      # failure here.
+      #
+      # The test artifacts (`tsconfig.json` include:["src"] compiles
+      # src/**/*.test.ts into the published package) are REPORTED, not failed:
+      # fixing them changes what every consumer receives, so it is a deliberate
+      # decision with its own commit, not a silent CI behaviour change. Visible
+      # beats blocking.
+      # ---------------------------------------------------------------------
+      - name: Assert prepack leaves the tree clean
+        run: |
+          set -uo pipefail
+
+          fail() {
+            echo "::error title=Publish gate failed::$1"
+            echo ""
+            echo "FAILED: $1"
+            echo ""
+            echo "$2"
+            exit 1
+          }
+
+          npm pack --dry-run > /tmp/pack.log 2>&1 || {
+            tail -30 /tmp/pack.log
+            fail "npm pack --dry-run failed" \
+          "prepack runs rm -rf build, a rebuild, sync-manifest and dxt-pack. A failure
+          here means the published tarball would be wrong or absent. The log above
+          names which step broke."
+          }
+
+          # The defect this step exists for. A publish that dirties version control
+          # makes the next checkout ambiguous and hides the change from review.
+          dirty=$(git status --porcelain)
+          if [ -n "$dirty" ]; then
+            echo "$dirty"
+            fail "prepack mutated tracked files" \
+          "prepack regenerates artifacts that are ALSO committed, so running it leaves the
+          working tree dirty. Measured on manifest.json: sync-manifest rewrites its version
+          field from package.json. That means every publish produces an uncommitted delta
+          nobody reviewed.
+
+          FIX: either stop tracking the generated file and let prepack own it, or commit the
+          regenerated result as part of the version bump. What must not happen is a publish
+          that silently changes a tracked file."
+          fi
+
+          files=$(grep -E "^npm notice (total files|[0-9.]+[kMG]?B +)" /tmp/pack.log | head -1)
+          echo "packaged: ${files:-see /tmp/pack.log}"
+
+          # Reported, not enforced -- see the comment above.
+          tests=$(grep -c "\.test\.js$" /tmp/pack.log || true)
+          if [ "$tests" -gt 0 ]; then
+            echo "::warning title=$tests test files ship in the package::$tests .test.js files are in the tarball because tsconfig.json includes src and tests live beside the code they cover. Fixing this needs a separate tsconfig.build.json, which changes what consumers receive -- decide it deliberately, do not let CI change it."
+          fi
+
+          echo "OK: prepack succeeded and left the tree clean"

@@ -59,12 +59,12 @@ function isCustomFieldQueryGroupOperator(
 }
 
 /**
- * Recursion and size bounds for .
+ * Recursion and size bounds for `custom_field_query`.
  *
  * The validator is recursive, so without a depth bound a caller chooses how
  * deep the stack goes -- and at roughly 2900 nested groups on this runtime the
- * call throws  INSTEAD of
- * returning a validation error. A thrown RangeError escapes  and
+ * call throws `RangeError: Maximum call stack size exceeded` INSTEAD of
+ * returning a validation error. A thrown RangeError escapes `safeParse` and
  * surfaces to the MCP client as an internal error, so the caller learns nothing
  * about what was wrong and the failure looks like a server fault.
  *

@@ -274,19 +274,12 @@ test("a highlight whose phrase is absent falls back honestly instead of lying", 
 // the first half of it -- the same class of contradiction as the entity bug,
 // reached by a different route.
 //
-// Left RED on purpose: fixing it means changing production behaviour in
-// documents.ts, which this shard must not do unilaterally. The assertion below
-// IS the fix specification.
-test("a highlight longer than half the window is still contained entirely", {
-  todo:
-    "LIVE DEFECT, not a flaky test. buildSearchPassage in tools/documents.ts slices " +
-    "start + window and does not widen the end to contain the phrase it anchored on, " +
-    "while buildPassage in tools/search.ts does. The two are documented as mirror views " +
-    "of the same search, so a highlighted phrase longer than window/2 reproduces exactly " +
-    "the contradiction the entity bug produced: highlights quote the whole phrase, the " +
-    "passage contains part of it. Marked todo rather than left red so the other tests " +
-    "keep gating CI. DELETE THIS MARKER when documents.ts widens the window.",
-}, () => {
+// buildSearchPassage now widens its window end to contain whatever resolved the
+// anchor, and it records that anchor length at the point of resolution rather
+// than recomputing it from the query terms -- the query term and the highlight
+// phrase are different strings, and widening by the wrong one is why this case
+// used to fail. This test is the fix specification; it stays armed.
+test("a highlight longer than half the window is still contained entirely", () => {
   const phrase =
     "the bodhisattva of compassion who hears the cries of the world and delays " +
     "her own liberation until every last being has walked through the gate";

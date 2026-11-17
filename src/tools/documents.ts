@@ -178,12 +178,29 @@ export function buildSearchPassage(
   // risks cutting a window that does not contain the actual hit.
   const lowerFull = full.toLowerCase();
   let center = -1;
+  let anchorLength = 0;
   if (searchHit?.highlights) {
-    for (const phrase of extractHighlightPhrases(searchHit.highlights)) {
-      const idx = lowerFull.indexOf(phrase.toLowerCase());
+    // Prefer the WHOLE decoded highlight when the stored text contains it
+    // verbatim. The window has to be wide enough for the phrase a caller sees
+    // quoted in the highlights field, and that phrase is the unit -- not one
+    // word out of it. The fragment list below stays as the fallback for a
+    // stemmed match that appears in no verbatim form at all.
+    const whole = decodeHighlightText(searchHit.highlights);
+    if (whole.length >= 4) {
+      const idx = lowerFull.indexOf(whole.toLowerCase());
       if (idx >= 0) {
         center = idx;
-        break;
+        anchorLength = whole.length;
+      }
+    }
+    if (center < 0) {
+      for (const phrase of extractHighlightPhrases(searchHit.highlights)) {
+        const idx = lowerFull.indexOf(phrase.toLowerCase());
+        if (idx >= 0) {
+          center = idx;
+          anchorLength = phrase.length;
+          break;
+        }
       }
     }
   }
@@ -199,6 +216,7 @@ export function buildSearchPassage(
       const idx = lowerFull.indexOf(term.toLowerCase());
       if (idx >= 0) {
         center = idx;
+        anchorLength = term.length;
         break;
       }
     }
@@ -213,9 +231,7 @@ export function buildSearchPassage(
   // while the returned highlights field still quotes the full phrase. The two
   // functions are documented as mirror images, so the widening has to exist in
   // both or the mirror lies.
-  const anchors = [...terms].sort((a, b) => b.length - a.length);
-  const anchor = anchors.find((term) => lowerFull.indexOf(term.toLowerCase()) >= 0);
-  const anchorEnd = anchor ? resolved + anchor.length : start + window;
+  const anchorEnd = resolved + anchorLength;
   const passage = full.slice(start, Math.max(start + window, anchorEnd));
   return {
     id: doc.id,
@@ -233,7 +249,7 @@ export function buildSearchPassage(
  * four characters cannot anchor a window reliably and are skipped so stray
  * short matches never drag the window to a wrong position.
  */
-export function extractHighlightPhrases(highlights: string): string[] {
+export function decodeHighlightText(highlights: string): string {
   const text = highlights
     .replace(/<[^>]*>/g, " ")
     .replace(/&lt;/g, "<")
@@ -246,6 +262,11 @@ export function extractHighlightPhrases(highlights: string): string[] {
     .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ")
     .trim();
+  return text;
+}
+
+export function extractHighlightPhrases(highlights: string): string[] {
+  const text = decodeHighlightText(highlights);
   if (!text) return [];
   // Prefer the longest surrounding run of substantial words: the hit phrase,
   // not a lone term that can match anywhere.

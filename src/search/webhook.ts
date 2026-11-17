@@ -131,8 +131,23 @@ export function parseEvent(body: string, contentType: string | undefined): Parse
   // template. Both are the same value.
   for (const key of ["id", "doc_id", "document_id"]) {
     const raw = fields[key];
-    const value = typeof raw === "number" ? raw : Number.parseInt(String(raw ?? ""), 10);
-    if (Number.isInteger(value) && value > 0 && !ids.includes(value)) ids.push(value);
+    // Canonical decimal only. parseInt(.., 10) stops at the first non-digit,
+    // so every one of these malformed payloads silently names a DIFFERENT real
+    // document: "5.9" becomes 5, "12abc" becomes 12, "1e400" becomes 1, and
+    // [1,2] becomes "1,2" then 1. The sync then re-indexes the wrong document
+    // and reports success, so nothing tells the operator the payload was bad.
+    // A non-string, non-number value (an array, an object, null) names nothing.
+    const canonicallyNumeric =
+      typeof raw === "number" ||
+      (typeof raw === "string" && /^[1-9][0-9]*$/.test(raw));
+    const value = canonicallyNumeric ? Number(raw) : Number.NaN;
+    if (
+      Number.isSafeInteger(value) &&
+      value > 0 &&
+      !ids.includes(value)
+    ) {
+      ids.push(value);
+    }
   }
 
   return { ids, idless: ids.length === 0 };

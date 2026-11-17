@@ -195,6 +195,38 @@ async function main() {
       }
     });
 
+    // A malformed or oversized request is rejected by express.json() BEFORE any
+    // route handler runs, so it reaches express default error handler rather
+    // than sendUnauthorized. When NODE_ENV is not production that handler
+    // renders err.stack into a text/html body, and the body goes to a caller
+    // that has NOT authenticated -- handing them absolute paths, dependency
+    // versions and internal module names. The Dockerfile sets no NODE_ENV, so
+    // in the shipped image that is the live behaviour.
+    //
+    // This handler answers with the status the error already carries (400 for a
+    // JSON parse failure, 413 for an oversized body, 415 for an unsupported
+    // charset) and a fixed minimal body, so the response no longer depends on
+    // NODE_ENV. It is deliberately placed after every route: express only
+    // consults a four-argument handler for errors, so ordering it last keeps
+    // the routes untouched.
+    app.use(
+      (
+        error: Error & { status?: number; statusCode?: number; type?: string },
+        _req: express.Request,
+        res: express.Response,
+        next: express.NextFunction
+      ) => {
+        if (res.headersSent) {
+          next(error);
+          return;
+        }
+        const status =
+          error.status ?? error.statusCode ?? (error.type === "entity.too.large" ? 413 : 400);
+        console.error("[paperless-mcp] Rejected request: " + error.message);
+        res.status(status).json({ error: "invalid request" });
+      }
+    );
+
     app.listen(resolvedPort, () => {
       console.log(
         `MCP Stateless Streamable HTTP Server listening on port ${resolvedPort}`

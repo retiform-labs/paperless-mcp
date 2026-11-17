@@ -58,8 +58,31 @@ function isCustomFieldQueryGroupOperator(
   );
 }
 
-function isCustomFieldQuery(value: unknown): value is CustomFieldQuery {
+/**
+ * Recursion and size bounds for .
+ *
+ * The validator is recursive, so without a depth bound a caller chooses how
+ * deep the stack goes -- and at roughly 2900 nested groups on this runtime the
+ * call throws  INSTEAD of
+ * returning a validation error. A thrown RangeError escapes  and
+ * surfaces to the MCP client as an internal error, so the caller learns nothing
+ * about what was wrong and the failure looks like a server fault.
+ *
+ * The clause count matters for a different reason: the validated tree becomes
+ * a GET query string, and a group may hold any number of clauses, so the caller
+ * also chooses how large a URL we attempt to send. Eight levels and sixty-four
+ * clauses are far past anything a real Paperless filter needs and comfortably
+ * inside every default URL limit.
+ */
+const MAX_CUSTOM_FIELD_QUERY_DEPTH = 8;
+const MAX_CUSTOM_FIELD_QUERY_CLAUSES = 64;
+
+function isCustomFieldQuery(value: unknown, depth = 0): value is CustomFieldQuery {
   if (!Array.isArray(value)) {
+    return false;
+  }
+
+  if (depth > MAX_CUSTOM_FIELD_QUERY_DEPTH) {
     return false;
   }
 
@@ -79,7 +102,10 @@ function isCustomFieldQuery(value: unknown): value is CustomFieldQuery {
     Array.isArray(value[1]) &&
     value[1].length >= 1
   ) {
-    return value[1].every((item) => isCustomFieldQuery(item));
+    return (
+      value[1].length <= MAX_CUSTOM_FIELD_QUERY_CLAUSES &&
+      value[1].every((item) => isCustomFieldQuery(item, depth + 1))
+    );
   }
 
   return false;
@@ -92,7 +118,12 @@ export const customFieldQuerySchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          "Invalid custom_field_query. Use [field_name_or_id, operator, value] or ['AND'|'OR', [clause1, clause2]].",
+          "Invalid custom_field_query. Use [field_name_or_id, operator, value] or " +
+          "['AND'|'OR', [clause1, clause2]], nested at most " +
+          MAX_CUSTOM_FIELD_QUERY_DEPTH +
+          " levels deep with at most " +
+          MAX_CUSTOM_FIELD_QUERY_CLAUSES +
+          " clauses per group.",
       });
     }
   }) as unknown as z.ZodType<CustomFieldQuery>;
